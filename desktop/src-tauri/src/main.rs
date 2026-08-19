@@ -1,0 +1,153 @@
+// Buddy desktop shell.
+//
+// Thin by design: the UI is the existing React app and the logic is the
+// existing FastAPI backend. This process exists to do three things a browser
+// tab cannot.
+//
+// 1. Start the backend and know when it is ready. The backend imports pandas
+//    and matplotlib, which takes seconds; a window shown before that renders
+//    connection errors, so the splash stays up until /healthz answers.
+//
+// 2. Find out which port it chose. The backend binds an OS-assigned port
+//    rather than a fixed 8000, and reports it on stdout as BUDDY_PORT=<n>.
+//
+// 3. Guarantee the backend dies with the window. An orphaned backend holds the
+//    database and the SearXNG port, so the next launch fails in a way the user
+//    cannot diagnose.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::io::{BufRead, BufReader};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use tauri::{Manager, WindowEvent};
+
+/// Longest we wait for the backend to answer /healthz before giving up.
+/// Generous because a cold first launch on a slow disk has to page in ~150 MB
+/// of native libraries.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Backend executable, shipped next to this one by the installer.
+#[cfg(windows)]
+const BACKEND_EXE: &str = "buddy-backend.exe";
+#[cfg(not(windows))]
+const BACKEND_EXE: &str = "buddy-backend";
+
+/// Holds the child so it can be killed on exit.
+struct Backend(Mutex<Option<Child>>);
+
+/// The URL the frontend talks to, resolved at startup.
+struct ApiBase(Mutex<String>);
+
+/// Exposed to the frontend so it can target the port the backend actually got.
+#[tauri::command]
+fn api_base(state: tauri::State<ApiBase>) -> String {
+    state.0.lock().map(|v| v.clone()).unwrap_or_default()
+}
+
+/// Spawn the backend and read the port it prints.
+///
+/// Returns the base URL. Reading stdout rather than scanning ports is what
+/// makes this deterministic: the backend tells us, so there is no guessing and
+/// no race with another application.
+fn spawn_backend(exe: std::path::PathBuf) -> Result<(Child, String), String> {
+    let mut command = Command::new(&exe);
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        // Ask for an OS-assigned port; see run_server.py.
+        .env("PORT", "0");
+
+    // Without this the backend flashes a console window on Windows.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("could not start the backend at {}: {e}", exe.display()))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "backend produced no stdout".to_string())?;
+
+    // Read on this thread until the port line arrives: nothing can proceed
+    // without it, and the timeout below bounds the wait.
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+
+    while Instant::now() < deadline {
+        line.clear();
+        match reader.read_line(&mut line) {
+            // EOF: the backend exited without reporting a port.
+            Ok(0) => break,
+            Ok(_) => {
+                if let Some(port) = line.trim().strip_prefix("BUDDY_PORT=") {
+                    let base = format!("http://127.0.0.1:{port}");
+                    // Drain the rest in the background; a full stdout pipe
+                    // would block the backend's own logging forever.
+                    std::thread::spawn(move || {
+                        let mut sink = String::new();
+                        while reader.read_line(&mut sink).unwrap_or(0) > 0 {
+                            sink.clear();
+                        }
+                    });
+                    return Ok((child, base));
+                }
+            }
+            Err(e) => return Err(format!("could not read the backend's output: {e}")),
+        }
+    }
+
+    let _ = child.kill();
+    Err("the backend did not report a port in time".into())
+}
+
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .manage(Backend(Mutex::new(None)))
+        .manage(ApiBase(Mutex::new(String::new())))
+        .invoke_handler(tauri::generate_handler![api_base])
+        .setup(|app| {
+            // Sidecar lives beside this executable in an installed build.
+            let exe_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .ok_or("could not locate the install directory")?;
+
+            let (child, base) = spawn_backend(exe_dir.join(BACKEND_EXE))?;
+
+            *app.state::<Backend>().0.lock().unwrap() = Some(child);
+            *app.state::<ApiBase>().0.lock().unwrap() = base.clone();
+
+            // Point the webview at the backend, which serves the UI too, so the
+            // app is same-origin and CORS never applies.
+            let window = app.get_webview_window("main").ok_or("no main window")?;
+            window.navigate(base.parse().map_err(|e| format!("bad backend url: {e}"))?)?;
+
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Closing the window must take the backend with it.
+            if let WindowEvent::Destroyed = event {
+                if let Some(state) = window.app_handle().try_state::<Backend>() {
+                    if let Ok(mut guard) = state.0.lock() {
+                        if let Some(child) = guard.as_mut() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
+                }
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running Buddy");
+}
