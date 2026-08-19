@@ -13,7 +13,9 @@
 //
 // 3. Guarantee the backend dies with the window. An orphaned backend holds the
 //    database and the SearXNG port, so the next launch fails in a way the user
-//    cannot diagnose.
+//    cannot diagnose. Killing it in the window handler is not enough - Task
+//    Manager, a crash, or a force-kill all skip that handler - so the child is
+//    also placed in a job object the OS tears down with this process.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -37,6 +39,73 @@ const BACKEND_EXE: &str = "buddy-backend";
 
 /// Holds the child so it can be killed on exit.
 struct Backend(Mutex<Option<Child>>);
+
+/// Tie a child process's lifetime to this one at the OS level.
+///
+/// The window handler covers a normal close, but not a force-kill from Task
+/// Manager and not a crash in this process - in both cases the handler never
+/// runs and the backend is left holding the database and the SearXNG port.
+///
+/// A job object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE closes that gap: the
+/// handle is owned by this process, so when this process dies by any means the
+/// kernel closes it and terminates everything in the job.
+///
+/// Deliberately best-effort. Failing to create a job is not a reason to refuse
+/// to start - it only means falling back to the window handler, which covers
+/// the ordinary case.
+#[cfg(windows)]
+fn attach_to_job(child: &Child) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return;
+        }
+
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        let ok = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if ok == 0 {
+            return;
+        }
+
+        AssignProcessToJobObject(job, child.as_raw_handle() as _);
+
+        // `job` is a raw HANDLE with no Drop, so letting it go out of scope
+        // leaks it deliberately - exactly what is wanted here. The job must
+        // stay open for this process's whole life, because closing it is the
+        // event that kills the backend. The OS reclaims it when we exit.
+    }
+}
+
+/// Kill the backend directly, for the ordinary window-close path.
+///
+/// The job object is the backstop for abnormal exits; this keeps a normal
+/// close from waiting on process teardown to release the database.
+fn kill_backend(state: &Backend) {
+    if let Ok(mut guard) = state.0.lock() {
+        if let Some(child) = guard.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        *guard = None;
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_to_job(_child: &Child) {}
 
 /// The URL the frontend talks to, resolved at startup.
 struct ApiBase(Mutex<String>);
@@ -71,6 +140,10 @@ fn spawn_backend(exe: std::path::PathBuf) -> Result<(Child, String), String> {
     let mut child = command
         .spawn()
         .map_err(|e| format!("could not start the backend at {}: {e}", exe.display()))?;
+
+    // Before anything else can fail: from here on the OS owns the guarantee
+    // that this child does not outlive us.
+    attach_to_job(&child);
 
     let stdout = child
         .stdout
@@ -139,12 +212,7 @@ fn main() {
             // Closing the window must take the backend with it.
             if let WindowEvent::Destroyed = event {
                 if let Some(state) = window.app_handle().try_state::<Backend>() {
-                    if let Ok(mut guard) = state.0.lock() {
-                        if let Some(child) = guard.as_mut() {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                        }
-                    }
+                    kill_backend(&state);
                 }
             }
         })
