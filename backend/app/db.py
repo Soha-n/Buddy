@@ -15,6 +15,7 @@ import threading
 from pathlib import Path
 
 from app.config import settings
+from app.paths import data_root
 
 _lock = threading.Lock()
 _connection: sqlite3.Connection | None = None
@@ -23,10 +24,10 @@ _connection: sqlite3.Connection | None = None
 def _resolve_db_path() -> Path:
     path = Path(settings.db_path)
     if not path.is_absolute():
-        # Relative to the backend/ directory (this file's grandparent), not the
-        # process's current working directory, so it doesn't matter where
-        # uvicorn was launched from.
-        path = Path(__file__).resolve().parent.parent / path
+        # Relative to the writable data directory, not this file's location and
+        # not the working directory: packaged, the code lives inside a bundle
+        # that an update replaces and that may not be writable at all.
+        path = data_root() / path
     return path
 
 

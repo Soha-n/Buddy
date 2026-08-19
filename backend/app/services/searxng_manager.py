@@ -41,6 +41,7 @@ from pathlib import Path
 import httpx
 
 from app.config import settings
+from app.paths import bundled_searxng_dir, data_root
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,9 @@ _PROBE_TIMEOUT = httpx.Timeout(3.0)
 _BIND_ADDRESS = "127.0.0.1"
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+#: pyvenv.cfg is newline-delimited regardless of platform.
+NEWLINE = "\n"
 
 
 @dataclass
@@ -85,13 +89,14 @@ _start_lock = asyncio.Lock()
 
 
 def _root() -> Path:
-    """Where SearXNG lives: beside the database, inside Buddy's own data dir."""
+    """Where SearXNG lives: inside Buddy's writable data directory.
+
+    Not the install directory - SearXNG writes runtime state, and an update
+    replaces the install wholesale.
+    """
     if settings.searxng_install_dir:
         return Path(settings.searxng_install_dir).expanduser()
-    db_path = Path(settings.db_path)
-    if not db_path.is_absolute():
-        db_path = Path(__file__).resolve().parent.parent.parent / db_path
-    return db_path.parent / "searxng"
+    return data_root() / "searxng"
 
 
 def _source_dir() -> Path:
@@ -234,6 +239,68 @@ def is_installed() -> bool:
     return _venv_python().exists() and (_source_dir() / "searx" / "webapp.py").exists()
 
 
+def _adopt_bundle() -> bool:
+    """Move a prebuilt SearXNG shipped with the installer into place.
+
+    The from-source path below needs git and a Python 3.10-3.12 interpreter.
+    Neither exists on a typical end-user machine, so the packaged build ships
+    SearXNG prebuilt and this copies it into the writable data directory on
+    first run.
+
+    Copied rather than used in place because SearXNG writes into its own
+    directory, and the install directory is both read-only in an all-users
+    install and replaced by the next update.
+    """
+    bundle = bundled_searxng_dir()
+    if not (bundle / "src" / "searx" / "webapp.py").exists():
+        return False
+
+    root = _root()
+    root.mkdir(parents=True, exist_ok=True)
+    logger.info("adopting bundled SearXNG from %s", bundle)
+
+    for name in ("src", "venv"):
+        source = bundle / name
+        target = root / name
+        if not source.exists() or target.exists():
+            continue
+        try:
+            shutil.copytree(source, target)
+        except OSError as exc:
+            logger.warning("copying bundled SearXNG %s failed: %s", name, exc)
+            return False
+
+    # A venv records absolute paths from build time; on a user's machine those
+    # point at the build agent. Rewriting pyvenv.cfg keeps the interpreter
+    # resolvable after the move.
+    _repair_venv_paths(root / "venv")
+    return is_installed()
+
+
+def _repair_venv_paths(venv: Path) -> None:
+    """Rewrite a relocated venv's recorded home so its interpreter still runs."""
+    cfg = venv / "pyvenv.cfg"
+    if not cfg.exists():
+        return
+    try:
+        lines = cfg.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    scripts = venv / "Scripts"
+    rewritten = []
+    for line in lines:
+        if line.lower().startswith("home ="):
+            rewritten.append(f"home = {scripts}")
+        elif line.lower().startswith("executable ="):
+            rewritten.append(f"executable = {scripts / 'python.exe'}")
+        else:
+            rewritten.append(line)
+    try:
+        cfg.write_text(NEWLINE.join(rewritten) + NEWLINE, encoding="utf-8")
+    except OSError as exc:
+        logger.warning("repairing venv paths failed: %s", exc)
+
+
 def _run(
     argv: list[str], cwd: Path | None = None, timeout: float = 900.0
 ) -> tuple[bool, str]:
@@ -366,6 +433,11 @@ async def install() -> tuple[bool, str]:
     async with _install_lock:
         if is_installed():
             _state.installed = True
+            return True, ""
+        # Prefer the shipped payload; cloning is the source-checkout path.
+        if _adopt_bundle():
+            _state.installed = True
+            logger.info("bundled SearXNG adopted")
             return True, ""
         _state.installing = True
         _state.error = None

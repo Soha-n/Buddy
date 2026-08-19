@@ -8,9 +8,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.db import init_db
+from app.paths import frontend_dir
 from app.routers import attachments, capabilities, chat, conversations, models, system
 from app.services import ollama, searxng_manager
 
@@ -85,6 +88,54 @@ app.include_router(attachments.router)
 app.include_router(capabilities.router)
 
 
-@app.get("/")
-async def root() -> dict[str, str]:
-    return {"name": "Buddy API", "docs": "/docs"}
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    """Liveness probe.
+
+    The desktop shell polls this before showing its window: the backend has to
+    import pandas and matplotlib, which takes a couple of seconds, and a window
+    shown any earlier would render errors against a socket nothing is listening
+    on yet.
+    """
+    return {"status": "ok"}
+
+
+# --------------------------------------------------------------------------- #
+# Frontend
+#
+# Packaged, the backend serves the built UI itself, so the app is same-origin
+# and CORS stops applying. Mounted last: every API router above already claimed
+# its prefix, and this catch-all must not shadow them.
+# --------------------------------------------------------------------------- #
+
+_web_dir = frontend_dir()
+
+if _web_dir.is_dir():
+    app.mount(
+        "/assets",
+        StaticFiles(directory=str(_web_dir / "assets")),
+        name="assets",
+    )
+
+    @app.get("/")
+    async def index() -> FileResponse:
+        return FileResponse(str(_web_dir / "index.html"))
+
+    @app.get("/{asset_path:path}")
+    async def spa(asset_path: str) -> FileResponse:
+        """Serve a bundled file, falling back to index.html.
+
+        The fallback is what lets the UI keep client-side routes working on a
+        hard refresh; the traversal check keeps that from serving files outside
+        the bundle.
+        """
+        candidate = (_web_dir / asset_path).resolve()
+        if candidate.is_file() and candidate.is_relative_to(_web_dir.resolve()):
+            return FileResponse(str(candidate))
+        return FileResponse(str(_web_dir / "index.html"))
+
+else:
+
+    @app.get("/")
+    async def root() -> dict[str, str]:
+        return {"name": "Buddy API", "docs": "/docs"}

@@ -27,12 +27,44 @@ import base64
 import logging
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.paths import IS_FROZEN, install_root
+
 logger = logging.getLogger(__name__)
+
+# Windows: keep the child from flashing a console window on a GUI build.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+
+#: Name of the interpreter shipped beside the executable in a packaged build.
+_RUNNER_EXE = "buddy-runner.exe" if sys.platform == "win32" else "buddy-runner"
+
+
+def _interpreter() -> str | None:
+    """Path to the interpreter that executes chart scripts.
+
+    From source this is simply ``sys.executable``. Frozen, it must not be:
+    ``sys.executable`` is Buddy itself, so re-launching it would start another
+    copy of the whole application instead of running the script - a fork bomb,
+    not a chart. PyInstaller's --onefile mode makes this unavoidable, which is
+    why the packaged build uses --onedir and ships a small separate interpreter
+    (``buddy-runner``) next to the main executable.
+
+    Returns None when frozen and that interpreter is missing, so the caller can
+    report a clear error rather than spawning something destructive.
+    """
+    if not IS_FROZEN:
+        return sys.executable
+    candidate = install_root() / _RUNNER_EXE
+    if candidate.exists():
+        return str(candidate)
+    logger.error("chart runner interpreter not found at %s", candidate)
+    return None
+
 
 # Only what data analysis and plotting actually need. Anything absent from this
 # set is rejected rather than sandboxed further - a chart script has no business
@@ -165,6 +197,20 @@ async def run_chart_code(source: str, data_files: dict[str, bytes] | None = None
 
     loop = asyncio.get_running_loop()
     started = loop.time()
+
+    interpreter = _interpreter()
+    if interpreter is None:
+        return RunResult(
+            ok=False,
+            stdout="",
+            error=(
+                "The chart runner is unavailable because this installation is "
+                "missing its Python component. Reinstalling Buddy will restore it."
+            ),
+            image_base64=None,
+            duration_s=0.0,
+        )
+
     workdir = Path(tempfile.mkdtemp(prefix="buddy-chart-"))
 
     try:
@@ -181,14 +227,17 @@ async def run_chart_code(source: str, data_files: dict[str, bytes] | None = None
         # -I isolates the interpreter: no site-packages from the user's
         # environment beyond what this venv provides, no PYTHON* env vars, and
         # the script's own directory is kept off sys.path.
+        # -I isolates a real interpreter from the user's environment; the
+        # frozen runner is already isolated and takes only a path.
+        argv = [interpreter] if IS_FROZEN else [interpreter, "-I", "-B"]
+
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-I",
-            "-B",
+            *argv,
             str(script_path),
             cwd=str(workdir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            creationflags=_NO_WINDOW,
         )
 
         try:

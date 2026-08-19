@@ -5,15 +5,23 @@ from __future__ import annotations
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.paths import data_root, ensure_data_root
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        # Both are read, the later winning: one shipped beside the executable,
+        # then a user-authored one in the writable data directory.
+        env_file=(".env", str(data_root() / ".env")),
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
     # 127.0.0.1 rather than localhost: on Windows the latter can resolve to ::1
     # first and stall for a beat before falling back to IPv4.
     ollama_host: str = "http://127.0.0.1:11434"
+    #: 0 means "let the OS pick a free port", which is what the desktop build
+    #: uses: a fixed 8000 collides with whatever else the user already runs.
     port: int = 8000
     log_level: str = "info"
 
@@ -27,8 +35,9 @@ class Settings(BaseSettings):
     # Overrides where we look for the Ollama model store when measuring disk.
     ollama_models: str | None = None
 
-    # Relative to backend/ unless given as an absolute path.
-    db_path: str = "data/buddy.db"
+    # Relative paths resolve against the writable data directory (app.paths),
+    # never the install directory - an update replaces that wholesale.
+    db_path: str = "buddy.db"
 
     # Weather provider, on by default.
     #
@@ -90,4 +99,5 @@ class Settings(BaseSettings):
         return self.ollama_host.rstrip("/")
 
 
+ensure_data_root()
 settings = Settings()
