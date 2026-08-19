@@ -22,8 +22,9 @@ interface ChatInputProps {
    *  remounts and can be read at send time. */
   webSearch?: boolean
   onToggleWebSearch?: () => void
-  /** False when there is no internet or no provider - the toggle is then shown
-   *  disabled with a reason rather than silently doing nothing. */
+  /** False when no provider is set up. The toggle stays *clickable* - a control
+   *  the user cannot even flip is a dead end - and the unmet requirement is
+   *  surfaced as a warning above the composer instead. */
   webSearchAvailable?: boolean
   webSearchDetail?: string | null
 }
@@ -133,77 +134,93 @@ export function ChatInput({
         handleFiles(event.dataTransfer.files)
       }}
     >
-      {onAttach && (
-        <>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept={ACCEPTED_TYPES}
-            className="chat-file-input"
-            onChange={(event) => {
-              handleFiles(event.target.files)
-              // Reset so re-picking the same file fires onChange again.
-              event.target.value = ''
-            }}
-          />
-          <button
-            type="button"
-            className="attach-button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={streaming}
-            aria-label="Attach a file"
-            title="Attach PDF, Word, Excel, CSV, text or image"
-          >
-            <span className="attach-icon" aria-hidden="true" />
-          </button>
-        </>
-      )}
+      {/* One rounded bar holding everything, rather than a row of separate
+          controls: the whole strip is the drop target, and the focus ring reads
+          as a single field instead of lighting up only the middle of it. */}
+      <div className="composer-bar">
+        {onAttach && (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept={ACCEPTED_TYPES}
+              className="chat-file-input"
+              onChange={(event) => {
+                handleFiles(event.target.files)
+                // Reset so re-picking the same file fires onChange again.
+                event.target.value = ''
+              }}
+            />
+            <button
+              type="button"
+              className="composer-plus"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={streaming}
+              aria-label="Add files"
+              title="Add a PDF, Word, Excel, CSV, text file or image — or just drop one here"
+            >
+              <span className="plus-icon" aria-hidden="true" />
+            </button>
+          </>
+        )}
 
-      {onToggleWebSearch && (
-        <button
-          type="button"
-          className={`web-toggle${webSearch ? ' active' : ''}`}
-          onClick={onToggleWebSearch}
-          disabled={streaming || !webSearchAvailable}
-          aria-pressed={webSearch}
-          title={
-            webSearchAvailable
-              ? webSearch
-                ? `Web search on${webSearchDetail ? ` — ${webSearchDetail}` : ''}. Click to turn off.`
-                : `Web search off. Click to let Buddy look things up${webSearchDetail ? ` — ${webSearchDetail}` : ''}.`
-              : (webSearchDetail ?? 'Web search is unavailable.')
-          }
-        >
-          <span className="web-icon" aria-hidden="true" />
-          <span className="web-toggle-label">Web</span>
-        </button>
-      )}
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          placeholder={effectivePlaceholder}
+          disabled={streaming || isDisabled}
+          rows={1}
+        />
 
-      <textarea
-        ref={textareaRef}
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-        onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
-        placeholder={effectivePlaceholder}
-        disabled={streaming || isDisabled}
-        rows={1}
-      />
+        <div className="composer-actions">
+          {onToggleWebSearch && (
+            <button
+              type="button"
+              className={`web-toggle${webSearch ? ' active' : ''}${
+                webSearch && !webSearchAvailable ? ' needs-setup' : ''
+              }`}
+              onClick={onToggleWebSearch}
+              // Only blocked while a reply is streaming, when changing it
+              // mid-answer would be meaningless. An unconfigured provider does
+              // NOT disable it: the user still needs to see and set the state.
+              disabled={streaming}
+              aria-pressed={webSearch}
+              title={
+                webSearch
+                  ? `Web search on${webSearchDetail ? ` — ${webSearchDetail}` : ''}. Click to turn off.`
+                  : `Web search off. Click to let Buddy look things up${webSearchDetail ? ` — ${webSearchDetail}` : ''}.`
+              }
+            >
+              <span className="web-icon" aria-hidden="true" />
+              <span className="web-toggle-label">Web</span>
+            </button>
+          )}
 
-      {streaming ? (
-        <button type="button" className="send-button" onClick={onStop}>
-          <span className="stop-icon" />
-        </button>
-      ) : (
-        <button
-          type="submit"
-          className="send-button primary"
-          disabled={!value.trim() || isDisabled || sendBlocked}
-        >
-          <span className="send-icon" />
-        </button>
-      )}
+          {streaming ? (
+            <button
+              type="button"
+              className="send-button"
+              onClick={onStop}
+              aria-label="Stop generating"
+            >
+              <span className="stop-icon" />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              className="send-button primary"
+              disabled={!value.trim() || isDisabled || sendBlocked}
+              aria-label="Send message"
+            >
+              <span className="send-icon" />
+            </button>
+          )}
+        </div>
+      </div>
     </form>
   )
 }

@@ -149,6 +149,19 @@ export function ChatScreen({
         </div>
       )}
 
+      {/* Only for the genuinely-broken case: every provider disabled, or no
+          internet. The normal "still starting" state needs no warning, because
+          the public-search fallback answers the question either way. */}
+      {webSearch && !webSearchStatus.available && (
+        <div className="error-box chat-inline-error websearch-setup">
+          <strong>Web search can't run right now</strong>
+          {webSearchStatus.detail ?? 'No search provider is available.'}
+          <span className="websearch-setup-note">
+            Weather and time still work without it.
+          </span>
+        </div>
+      )}
+
       {imageOnTextModel && (
         <VisionWarning
           currentModel={currentModel}

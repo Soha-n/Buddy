@@ -98,10 +98,6 @@ def detect_kind(filename: str) -> str:
     return "unsupported"
 
 
-def is_supported(filename: str) -> bool:
-    return detect_kind(filename) != "unsupported"
-
-
 # --------------------------------------------------------------------------- #
 # Chunking
 # --------------------------------------------------------------------------- #

@@ -5,6 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Buddy — Private Local AI Chat</title>
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+    <!-- Painted before the stylesheet or any JS loads. Without it the browser
+         shows a white page for a frame, which flashes hard against the dark UI
+         that replaces it. Kept in sync with --bg in index.css. -->
+    <style>
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+        background: #0f1115;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

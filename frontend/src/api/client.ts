@@ -9,9 +9,9 @@ import type {
   HealthResponse,
   InstalledModelsResponse,
   LibrarySearchResponse,
+  LocationResponse,
   RecommendationsResponse,
   RunCodeResponse,
-  SystemSpecs,
   TiersResponse,
   UploadResponse,
   VisionCheckResponse,
@@ -66,10 +66,6 @@ async function sendJson<T>(
 
 export function getHealth(): Promise<HealthResponse> {
   return getJson<HealthResponse>('/api/health')
-}
-
-export function getSpecs(refresh = false): Promise<SystemSpecs> {
-  return getJson<SystemSpecs>(`/api/specs?refresh=${refresh}`)
 }
 
 export function getRecommendations(
@@ -214,4 +210,33 @@ export function checkVision(model: string): Promise<VisionCheckResponse> {
 
 export function getWebSearchStatus(refresh = false): Promise<WebSearchStatus> {
   return getJson<WebSearchStatus>(`/api/websearch/status?refresh=${refresh}`)
+}
+
+/* ------------------------------- User context -------------------------------- */
+
+/**
+ * Both flags default off so opening a panel neither probes the OS nor raises a
+ * permission prompt. `precise` asks the OS location service for coordinates,
+ * which shows a system consent dialog.
+ */
+export function getLocation(detect = false, precise = false): Promise<LocationResponse> {
+  return getJson<LocationResponse>(
+    `/api/context/location?detect=${detect}&precise=${precise}`,
+  )
+}
+
+export function setLocation(
+  city: string,
+  region?: string,
+  country?: string,
+): Promise<LocationResponse> {
+  return sendJson<LocationResponse>('/api/context/location', 'POST', {
+    city,
+    region: region || null,
+    country: country || null,
+  })
+}
+
+export function clearLocation(): Promise<LocationResponse> {
+  return sendJson<LocationResponse>('/api/context/location', 'DELETE')
 }

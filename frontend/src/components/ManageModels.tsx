@@ -6,6 +6,7 @@ import { useState } from 'react'
 
 import { deleteModel } from '../api/client'
 import { useTieredModels } from '../hooks/useTieredModels'
+import { LocationSettings } from './LocationSettings'
 import { AllTab } from './manage/AllTab'
 import { TierTab } from './manage/TierTab'
 import { SpecsPanel } from './SpecsPanel'
@@ -93,6 +94,15 @@ export function ManageModels({
             Re-scan hardware
           </button>
         </div>
+      </div>
+
+      {/* Sits beside hardware because both are "what Buddy knows about this
+          machine" - and it is where a wrong IP guess gets corrected. */}
+      <div className="panel hardware-summary">
+        <span className="panel-title" style={{ margin: 0 }}>
+          Your context
+        </span>
+        <LocationSettings />
       </div>
 
       <div className="tab-bar">

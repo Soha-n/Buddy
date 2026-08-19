@@ -379,3 +379,32 @@ class SearchCitation(BaseModel):
     url: str
     #: True when the full page was read, not just the search snippet.
     fetched: bool = False
+
+
+# --------------------------------------------------------------------------- #
+# User context (location + time)
+# --------------------------------------------------------------------------- #
+
+
+class LocationResponse(BaseModel):
+    city: str | None = None
+    region: str | None = None
+    country: str | None = None
+    timezone: str | None = None
+    label: str
+    #: "manual" (typed by the user), "os_gps" (Windows Location Service),
+    #: "os_region" (regional settings - country only), or "unavailable".
+    source: Literal["manual", "os_gps", "os_region", "unavailable"]
+    #: True when the OS can give exact coordinates if the user permits it, so the
+    #: UI can offer precise detection only where it would work.
+    precise_available: bool = True
+    #: Local date/time as this machine sees it, so the UI can show what the
+    #: model was told without computing it a second way.
+    local_date: str
+    local_time: str
+
+
+class SetLocationRequest(BaseModel):
+    city: str = Field(min_length=1, max_length=120)
+    region: str | None = Field(default=None, max_length=120)
+    country: str | None = Field(default=None, max_length=120)

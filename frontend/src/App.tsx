@@ -21,20 +21,22 @@ import { useModelPreload } from './hooks/useModelPreload'
 import { useModelPull } from './hooks/useModelPull'
 import type { InstalledModel } from './types/api'
 
-type View = 'onboarding' | 'chat'
+/** 'deciding' exists so neither real view renders before we know which one is
+ *  correct - starting at 'onboarding' flashed the scan screen for a frame. */
+type View = 'deciding' | 'onboarding' | 'chat'
 
 export function App() {
   const { health, loading: healthLoading, error: healthError, recheck } = useHealth()
   const ollamaReady = health?.ollama.running === true
 
-  const [view, setView] = useState<View>('onboarding')
+  const [view, setView] = useState<View>('deciding')
   const [installed, setInstalled] = useState<InstalledModel[]>([])
   const [installedChecked, setInstalledChecked] = useState(false)
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null)
   const [defaultModel, setDefaultModel] = useState<string | null>(null)
   const [manageModelsOpen, setManageModelsOpen] = useState(false)
 
-  const conversations = useConversations(ollamaReady && view !== 'onboarding')
+  const conversations = useConversations(ollamaReady && view === 'chat')
   const { conversation } = useConversation(activeConversationId)
   const backgroundPull = useModelPull()
 
@@ -68,6 +70,9 @@ export function App() {
       .catch(() => {
         setInstalled([])
         setInstalledChecked(true)
+        // Must still leave 'deciding', or the spinner would never end. With no
+        // known models, onboarding is the honest place to land.
+        setView('onboarding')
       })
   }, [ollamaReady, installedChecked])
 
@@ -187,6 +192,25 @@ export function App() {
       refreshInstalled()
     }
   }, [backgroundPull.state, refreshInstalled])
+
+  // Still resolving health, or health is fine but the installed-model check has
+  // not come back yet. Either way, showing a spinner beats showing a view we may
+  // be about to replace.
+  if (view === 'deciding') {
+    return (
+      <HealthGate
+        health={health}
+        loading={healthLoading}
+        error={healthError}
+        onRetry={recheck}
+      >
+        <div className="center-state">
+          <div className="spinner" />
+          <p className="muted">Getting things ready…</p>
+        </div>
+      </HealthGate>
+    )
+  }
 
   if (view === 'onboarding') {
     return (

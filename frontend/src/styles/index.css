@@ -503,12 +503,6 @@ code {
   flex: 1;
 }
 
-.installed-flag {
-  color: var(--good);
-  font-size: 0.72rem;
-  font-weight: 600;
-}
-
 /* ------------------------------- Excluded --------------------------------- */
 
 .excluded details {
@@ -939,35 +933,51 @@ code {
 
 .chat-form {
   padding: 0 0 0.85rem;
-  display: flex;
-  gap: 0.5rem;
-  align-items: flex-end;
   max-width: 46rem;
   width: 100%;
   margin: 0 auto;
 }
 
-.chat-form textarea {
-  flex: 1;
-  resize: none;
+/* One rounded container holding +, the textarea, Web and send. The border lives
+   here rather than on the textarea so the whole strip reads as a single field
+   and the focus ring wraps every control instead of just the middle one. */
+.composer-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.4rem;
+  padding: 0.4rem 0.45rem;
   background: var(--bg-raised);
   border: 1px solid var(--border-strong);
-  border-radius: 22px;
+  border-radius: 26px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+/* :focus-within, not :focus - the focus is on the textarea inside. */
+.composer-bar:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.chat-form.drag-active .composer-bar {
+  border-color: var(--accent);
+  border-style: dashed;
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.chat-form textarea {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  /* Transparent and border-less: the .composer-bar around it supplies both. */
+  background: transparent;
+  border: none;
   color: var(--text);
   font-family: inherit;
   font-size: 0.94rem;
   line-height: 1.5;
-  padding: 0.75rem 1.15rem;
-  min-height: 3rem;
+  padding: 0.55rem 0.35rem;
+  min-height: 2.1rem;
   max-height: 11rem;
   outline: none;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
-  transition: border-color 0.15s, box-shadow 0.15s;
-}
-
-.chat-form textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
 .chat-form textarea::placeholder {
@@ -978,9 +988,72 @@ code {
   opacity: 0.6;
 }
 
+/* The + that opens the file picker. Circular and quiet, so it reads as a
+   secondary affordance next to the text field rather than competing with send. */
+.composer-plus {
+  flex: 0 0 auto;
+  width: 2.2rem;
+  height: 2.2rem;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.composer-plus:hover:not(:disabled) {
+  background: var(--bg-input);
+  color: var(--text);
+}
+.composer-plus:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* A + drawn from two bars rather than a glyph, so it stays optically centred at
+   any font size. */
+.plus-icon {
+  position: relative;
+  width: 1.05rem;
+  height: 1.05rem;
+  display: block;
+}
+.plus-icon::before,
+.plus-icon::after {
+  content: '';
+  position: absolute;
+  background: currentColor;
+  border-radius: 1px;
+}
+.plus-icon::before {
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1.7px;
+  transform: translateX(-50%);
+}
+.plus-icon::after {
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1.7px;
+  transform: translateY(-50%);
+}
+
+/* Web + send, pinned to the right end of the bar. */
+.composer-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
 .send-button {
-  width: 3rem;
-  height: 3rem;
+  width: 2.2rem;
+  height: 2.2rem;
   border-radius: 50%;
   display: grid;
   place-items: center;
@@ -1022,20 +1095,28 @@ code {
   display: block;
 }
 
-.chat-stats {
-  font-size: 0.72rem;
-  color: var(--text-faint);
-}
-
 /* -------------------------------- States ---------------------------------- */
 
+/* Fills whatever it is dropped into and centres its own contents, rather than
+   relying on `margin: auto` - that only centres inside a flex/grid parent, and
+   #root is neither, so the connecting state used to sit at the top-left. */
 .center-state {
-  margin: auto;
-  text-align: center;
-  max-width: 30rem;
-  display: grid;
+  min-height: 100%;
+  width: 100%;
+  padding: 2rem 1.5rem;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   gap: 0.9rem;
-  justify-items: center;
+  text-align: center;
+}
+
+/* Children stay narrow while the container spans the viewport, so the text block
+   is readable but the centring has room to work. */
+.center-state > * {
+  max-width: 30rem;
 }
 
 .spinner {
@@ -1743,48 +1824,7 @@ code {
   display: none;
 }
 
-.attach-button {
-  flex: 0 0 auto;
-  width: 2.5rem;
-  height: 2.5rem;
-  margin-bottom: 0.25rem;
-  border-radius: 50%;
-  border: 1px solid var(--border-strong);
-  background: var(--bg-raised);
-  color: var(--text-dim);
-  cursor: pointer;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
-}
-.attach-button:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--text);
-  background: var(--bg-input);
-}
-.attach-button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
 
-/* A paperclip drawn in CSS rather than shipped as an asset, matching how the
-   send and stop icons in this file are done. */
-.attach-icon {
-  width: 1.05rem;
-  height: 1.05rem;
-  border: 1.8px solid currentColor;
-  border-radius: 0.55rem 0.55rem 0.55rem 0.55rem;
-  border-right-color: transparent;
-  transform: rotate(45deg);
-  display: block;
-}
-
-/* Drag feedback covers the whole composer, since that is the drop target. */
-.chat-form.drag-active textarea {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-dim);
-}
 
 .attachment-chips {
   display: flex;
@@ -1947,11 +1987,6 @@ code {
 .vision-warning-button.primary:hover {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
-}
-
-.vision-warning-hint {
-  font-size: 0.75rem;
-  color: var(--text-faint);
 }
 
 /* --------------------------- Chart code execution -------------------------- */
@@ -2120,17 +2155,17 @@ code {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 0.35rem;
-  height: 2.5rem;
-  margin-bottom: 0.25rem;
-  padding: 0 0.7rem;
-  border-radius: 22px;
+  gap: 0.3rem;
+  height: 2.2rem;
+  padding: 0 0.6rem;
+  border-radius: 18px;
   border: 1px solid var(--border-strong);
-  background: var(--bg-raised);
+  background: var(--bg-input);
   color: var(--text-dim);
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-family: inherit;
   cursor: pointer;
+  white-space: nowrap;
   transition: border-color 0.15s, background 0.15s, color 0.15s;
 }
 .web-toggle:hover:not(:disabled) {
@@ -2158,8 +2193,8 @@ code {
    icons in this file rather than adding an icon asset. */
 .web-icon {
   position: relative;
-  width: 0.95rem;
-  height: 0.95rem;
+  width: 0.88rem;
+  height: 0.88rem;
   border: 1.6px solid currentColor;
   border-radius: 50%;
   display: block;
@@ -2277,4 +2312,130 @@ code {
   border-radius: 3px;
   background: rgba(52, 211, 153, 0.13);
   color: var(--good);
+}
+
+/* ----------------------------- Location settings ---------------------------- */
+
+.location-settings {
+  margin-top: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.location-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.location-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.location-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.location-value {
+  font-size: 0.9rem;
+  color: var(--text);
+}
+/* Kept visually quieter than the place itself: an IP estimate should not look
+   like something the user confirmed. */
+.location-source {
+  color: var(--text-faint);
+  font-size: 0.78rem;
+}
+.location-clock {
+  font-size: 0.76rem;
+  color: var(--text-dim);
+}
+
+.location-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.location-button {
+  padding: 0.32rem 0.65rem;
+  font-size: 0.78rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  color: var(--text);
+  cursor: pointer;
+}
+.location-button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.location-button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.location-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.location-form {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.location-form input {
+  flex: 1;
+  min-width: 11rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
+  font-family: inherit;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  color: var(--text);
+  outline: none;
+}
+.location-form input:focus {
+  border-color: var(--accent);
+}
+
+.location-error {
+  font-size: 0.8rem;
+  color: var(--bad);
+}
+
+.location-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+/* Web-search setup notice: amber, not red - nothing failed, a prerequisite is
+   simply missing, and the user chose to turn the toggle on. */
+.error-box.websearch-setup {
+  border-color: var(--warn);
+  background: rgba(251, 191, 36, 0.08);
+}
+.websearch-setup-note {
+  margin-top: 0.3rem;
+  font-size: 0.76rem;
+  color: var(--text-faint);
+}
+
+/* The toggle stays usable when unconfigured, but a dashed ring marks it as
+   "on, yet not able to do anything" so the state is not misread as working. */
+.web-toggle.needs-setup {
+  border-style: dashed;
+  border-color: var(--warn);
+  background: rgba(251, 191, 36, 0.16);
+  color: var(--warn);
 }

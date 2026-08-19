@@ -42,7 +42,17 @@ from fastapi.responses import StreamingResponse
 from app.models import attachment_store as attachments
 from app.models import conversation_store as store
 from app.models.schemas import ChatRequest
-from app.services import capabilities, ollama, rag, vision, websearch
+from app.services import (
+    capabilities,
+    direct_answers,
+    followup,
+    ollama,
+    query_planner,
+    rag,
+    usercontext,
+    vision,
+    websearch,
+)
 from app.sse import MEDIA_TYPE, SSE_HEADERS, format_event, guarded_stream
 
 logger = logging.getLogger(__name__)
@@ -129,10 +139,29 @@ async def _chat_stream_with_meta(
     messages: list[dict],
     describe_targets: list[tuple[str, str]],
     search_outcome: websearch.SearchOutcome | None,
+    direct: direct_answers.DirectAnswer | None = None,
 ) -> AsyncIterator[str]:
     """Prefix the token stream with meta and citation events."""
     if announce_id:
         yield format_event("meta", {"conversation_id": conversation_id})
+    if direct is not None:
+        # A direct answer has exactly one source, presented the same way as
+        # search citations so the UI needs no second code path.
+        yield format_event(
+            "sources",
+            {
+                "query": "",
+                "provider": "direct",
+                "citations": [
+                    {
+                        "index": 1,
+                        "title": direct.source_label,
+                        "url": direct.source_url or "",
+                        "fetched": True,
+                    }
+                ],
+            },
+        )
     if search_outcome is not None:
         # Emitted before the first token so the UI can show what was consulted
         # while the model is still thinking.
@@ -240,16 +269,106 @@ async def chat(request: ChatRequest) -> StreamingResponse:
         request.attachment_ids,
     )
 
+    # --- Plan the turn ----------------------------------------------------- #
+    # A follow-up is resolved first: "what about tomorrow" tells the classifier
+    # nothing on its own, but "weather tokyo tomorrow" routes straight to the
+    # weather API. The model still sees the user's real words - only the
+    # machinery around it uses the rewrite.
+    history = [m.model_dump(exclude_none=True) for m in request.messages]
+    resolved_question, was_rewritten = followup.resolve(last_user_message, history)
+    if was_rewritten:
+        logger.info("follow-up resolved: %r -> %r", last_user_message, resolved_question)
+
+    has_attachments = await asyncio.to_thread(
+        attachments.has_ready_attachments, conversation_id
+    )
+    plan = query_planner.plan(
+        resolved_question,
+        web_enabled=request.web_search,
+        has_attachments=has_attachments,
+    )
+    logger.info(
+        "plan: intent=%s pages=%d results=%d (%s)",
+        plan.intent.value,
+        plan.pages_to_fetch,
+        plan.results_wanted,
+        plan.reason,
+    )
+
+    # Location is resolved only when the question actually needs a place, and
+    # cached after the first time - so an IP lookup never happens for someone who
+    # only ever asks about maths.
+    location = usercontext.cached_location()
+    needs_place = plan.needs_location or plan.direct_kind == query_planner.DirectKind.WEATHER
+    if needs_place:
+        # Weather needs coordinates, not a country: wttr.in resolves a bare
+        # "India" to an arbitrary town inside it. The OS location service is
+        # asked for a precise fix when the question is about the user's own
+        # surroundings and we do not already have one - Windows shows its consent
+        # prompt once, and the answer is cached for the session afterwards.
+        wants_precise = plan.needs_location and (
+            location is None or not location.has_coordinates
+        )
+        if location is None or wants_precise:
+            location = await usercontext.get_location(
+                force_refresh=wants_precise, allow_precise=wants_precise
+            )
+
+    # --- Direct answers ---------------------------------------------------- #
+    # Weather and time have exact sources. Searching for them and scraping a
+    # result page is slower and less accurate than asking the right API.
+    direct: direct_answers.DirectAnswer | None = None
+    search_outcome = None
+    search_error: str | None = None
+
+    if plan.direct_kind == query_planner.DirectKind.TIME:
+        direct = direct_answers.time_and_date(location)
+    elif plan.direct_kind == query_planner.DirectKind.WEATHER:
+        # A named place in the question wins over the user's own location. Only
+        # the place name is passed - a geocoder handed the whole sentence
+        # resolves nothing.
+        try:
+            direct = await direct_answers.weather(plan.place, location)
+        except direct_answers.DirectAnswerError as exc:
+            # Fall through to ordinary search rather than failing: a generic
+            # weather search still beats no answer.
+            logger.info("weather provider declined (%s); falling back to search", exc)
+            if request.web_search:
+                # needs_location is carried over so the query still gets the
+                # user's city appended below - a bare "current temperature"
+                # search is useless without a place.
+                plan = query_planner.QueryPlan(
+                    intent=query_planner.Intent.LOOKUP,
+                    search_query=plan.search_query,
+                    place=plan.place,
+                    results_wanted=5,
+                    pages_to_fetch=0,
+                    needs_location=plan.needs_location,
+                    reason="no weather provider configured, answering from search",
+                )
+            else:
+                search_error = str(exc)
+
     # --- Web search -------------------------------------------------------- #
     # Runs before generation rather than as a tool call: local models decide
     # when to search unreliably (one refused a 2026 question outright, another
     # searched for "17 x 23"), and vision-only models report no tool support at
     # all. A user-controlled toggle behaves identically on every model.
-    search_outcome = None
-    search_error: str | None = None
-    if request.web_search:
+    if (
+        direct is None
+        and request.web_search
+        and plan.results_wanted > 0
+    ):
+        query = plan.search_query or resolved_question
+        if plan.needs_location and location is not None:
+            query = query_planner.localize_query(query, location.label)
         try:
-            search_outcome = await websearch.search(last_user_message)
+            search_outcome = await websearch.search(
+                query,
+                fetch_pages=plan.pages_to_fetch > 0,
+                max_results=plan.results_wanted,
+                pages_to_fetch=plan.pages_to_fetch,
+            )
         except websearch.SearchError as exc:
             # Surfaced as a system note rather than an HTTP error: the model can
             # still answer from what it knows, and failing the whole turn
@@ -262,12 +381,22 @@ async def chat(request: ChatRequest) -> StreamingResponse:
 
     system_turns: list[dict] = []
 
+    # Always first, search or no search: a model that knows today's real date
+    # stops calling this year's events "upcoming", and one that knows the user's
+    # city can resolve "here". Cheap - a few lines of text.
+    system_turns.append(
+        {"role": "system", "content": usercontext.build_context(location)}
+    )
+
     context = await rag.build_context(conversation_id, last_user_message)
     if context:
         system_turns.append({"role": "system", "content": rag.SYSTEM_PROMPT})
         system_turns.append({"role": "system", "content": context})
 
-    if search_outcome is not None:
+    if direct is not None:
+        system_turns.append({"role": "system", "content": direct_answers.SYSTEM_PROMPT})
+        system_turns.append({"role": "system", "content": direct.content})
+    elif search_outcome is not None:
         system_turns.append({"role": "system", "content": websearch.SYSTEM_PROMPT})
         system_turns.append(
             {"role": "system", "content": websearch.build_context(search_outcome)}
@@ -277,16 +406,24 @@ async def chat(request: ChatRequest) -> StreamingResponse:
             {
                 "role": "system",
                 "content": (
-                    f"A web search was attempted but failed: {search_error} "
-                    "Tell the user the search could not be completed, then answer "
-                    "from your own knowledge if you can, flagging that it may be "
-                    "out of date."
+                    "A live lookup was attempted for this question and could not "
+                    f"be completed. The exact reason is: {search_error} "
+                    "Relay that reason to the user in one or two sentences, using "
+                    "its actual wording. Do NOT explain this as a limit of your "
+                    "training data or knowledge cutoff - that is not why it "
+                    "failed, and saying so would send the user looking for the "
+                    "wrong fix. Do not invent a current value."
                 ),
             }
         )
-    else:
-        # Toggle off. The model is told to name the toggle instead of either
-        # inventing a current fact or claiming a flat inability.
+    elif not request.web_search and plan.intent in {
+        query_planner.Intent.LOOKUP,
+        query_planner.Intent.RESEARCH,
+    }:
+        # The question needed live data and the toggle is off. Only injected in
+        # that case, so an ordinary question is never told about a toggle it does
+        # not need - which is what previously made a small model demand the web
+        # for "17 x 23".
         system_turns.append(
             {"role": "system", "content": websearch.OFFLINE_SYSTEM_PROMPT}
         )
@@ -313,6 +450,7 @@ async def chat(request: ChatRequest) -> StreamingResponse:
                 messages,
                 describe_targets,
                 search_outcome,
+                direct,
             ),
             f"chat:{request.model}",
         ),

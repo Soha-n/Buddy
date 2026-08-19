@@ -99,6 +99,3 @@ async def list_vision_models() -> list[str]:
     ]
 
 
-def clear_cache() -> None:
-    """Drop cached capabilities, for tests and after a model is deleted."""
-    _cache.clear()

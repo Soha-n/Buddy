@@ -8,7 +8,7 @@ then lets you chat with it. Everything runs locally — no data leaves the machi
 - **Backend:** Python + FastAPI
 - **Inference:** Ollama (local)
 - **Retrieval:** SQLite FTS5 full-text search (no extra models)
-- **Live data:** optional web search via SearXNG or DuckDuckGo
+- **Live data:** weather and web search work out of the box, no keys, no signup
 
 ## The flow
 
@@ -19,8 +19,8 @@ then lets you chat with it. Everything runs locally — no data leaves the machi
 4. **Chat** — streams the reply token by token.
 5. **Attach** — drop in a PDF, Word doc, spreadsheet, CSV or image and ask
    questions about it. Retrieval is scoped to that one conversation.
-6. **Search** — flip the Web toggle on for a message and Buddy looks the answer
-   up before replying. Off by default.
+6. **Search** — flip the Web toggle on and Buddy decides how much lookup each
+   question deserves: none, an API call, snippets, or several full pages.
 
 ## Requirements
 
@@ -128,6 +128,9 @@ called out in the UI rather than silently trusted.
 | POST | `/api/attachments/run-code` | Execute an approved chart script |
 | GET | `/api/capabilities/vision-check` | Can this model read images? |
 | GET | `/api/websearch/status` | Which search provider is usable |
+| GET | `/api/context/location` | Location used for "here" questions |
+| POST | `/api/context/location` | Override the detected city |
+| DELETE | `/api/context/location` | Forget the override, re-detect |
 
 Interactive docs at <http://127.0.0.1:8000/docs>.
 
@@ -168,7 +171,7 @@ frontend/
       client.ts          Typed REST wrappers
     hooks/               useHealth, useSystemSpecs, useModelPull, useChat,
                          useAttachments, useVisionCheck, useChartRunner,
-                         useWebSearchStatus
+                         useWebSearchStatus, useLocation
     components/          HealthGate, SpecsPanel, ModelCard, ChatView, ...
     types/api.ts         Mirrors of the backend schemas
 ```
@@ -292,29 +295,198 @@ toggle behaves identically on every model and is never surprising.
 
 ### Providers
 
-| Provider | When it is used | Notes |
+Search works on first launch with nothing to configure. Buddy installs and runs
+its **own SearXNG** — no Docker, no API key, no signup — and uses it for every
+query.
+
+| Provider | When | Notes |
 | --- | --- | --- |
-| **SearXNG** | Automatically, if one answers at `SEARXNG_URL` | Self-hosted, private, real JSON API. Preferred when present. |
-| **DuckDuckGo** | Otherwise | No API key, works on a bare machine. HTML scrape, so markup changes can break it. |
+| **Built-in SearXNG** | always, once ready | Buddy's own instance on loopback. Unlimited, private, nothing shared. |
+| **Your API key** | if the built-in one is down | `SEARCH_PROVIDER` + `SEARCH_API_KEY` (brave / tavily). |
+| **Public search** | while installing, or on failure | DuckDuckGo. Keeps search from ever being unavailable. |
 
-Buddy detects SearXNG once per session and uses it if reachable — it does not
-install or manage one. To get private search, run your own instance (its
-container needs Docker) and point `SEARXNG_URL` at it; Buddy switches over on the
-next restart with no code change.
+First launch clones SearXNG and installs it in the background — a few minutes —
+during which public search answers everything. The status label upgrades itself
+from "public search" to "private search" when the swap happens; no reload needed.
 
-### How a search turn works
+**Web search is therefore never "not set up".** If the built-in instance is
+starting, or dies, or was never installed, a query still gets answered.
 
-1. The question is sent to the provider; up to 6 results come back.
-2. The top 3 result pages are fetched **concurrently** and reduced to readable
-   text — snippets alone are enough for a price but too thin to explain anything.
-3. Each fetch may fail independently. Plenty of sites refuse unattended requests
-   (Wikipedia answers `403` to a plain GET; so do several exchanges), so a
-   refusal degrades that result to snippet-only rather than failing the search.
-4. Results are injected as numbered sources with an instruction to prefer them
-   over training data, and to stop treating a post-cutoff date as the future.
+### Search depth is decided per question
 
-Search composes with uploaded files: with a document attached and the toggle on,
-one answer can cite your private notes *and* the live market price.
+Treating every question the same is what makes assistants feel slow. "What time
+is it" does not need six web results, and "compare solar vs wind" cannot be
+answered from a one-line snippet. So each question is classified first, and the
+classification sets the budget:
+
+| Intent | What it does | Network | Typical |
+| --- | --- | --- | --- |
+| **none** | Answers from the model alone — maths, code, writing, questions about your attached files | nothing | ~1.5s |
+| **direct** | Calls a purpose-built API — weather, time, date | 1 request | ~2-4s |
+| **lookup** | Search snippets only, no page fetches — a price, a score, who someone is | 1 request | ~6s |
+| **research** | Snippets plus 3 pages read in full — comparisons, how-tos, analysis | 4 requests | ~19s |
+
+Measured on this machine with `llama3.2:3b`. The classifier is rule-based rather
+than a model call: asking a local model to classify would add two to four seconds
+to a feature whose whole purpose is spending less time, and small models classify
+inconsistently.
+
+Weather is a good example of why "direct" exists. Searching for the temperature
+returns weather-site landing pages, and scraping one yields whatever number sat in
+a marketing div — possibly for the wrong city. A weather API returns the
+temperature for a named place, as a number.
+
+Note that with a document attached, a question about *that document* stays local
+even with the toggle on — searching the web for your own spreadsheet would return
+strangers' data.
+
+### Follow-up questions
+
+> "What's the weather in Tokyo?" → *26°C, mainly clear*
+> "what about tomorrow?"
+
+The second message means nothing on its own: classified alone it looks like idle
+chat, and searched verbatim it returns noise. Short messages that lean on the
+conversation are rewritten into standalone ones first — `what about tomorrow` +
+the previous turn becomes `weather tokyo tomorrow`, which routes to the weather
+API for the right city.
+
+The rewrite feeds only the machinery — the classifier and the search query. The
+model always receives your real words and the full history, and resolves pronouns
+itself.
+
+### Weather
+
+"current temp" works with no setup: the question is recognised, the user's own
+location is resolved on-device, and [wttr.in](https://github.com/chubin/wttr.in)
+returns real figures. Apache-2.0, no API key, no non-commercial clause, and
+self-hostable — the only keyless weather source that clears the bar for a
+commercial product.
+
+Coordinates are preferred over a place name where the OS provides them, because
+wttr.in resolves a bare country to an arbitrary town inside it ("India" landed on
+Tamia, ~200km away). It also reports the nearest weather *station* rather than the
+place asked about — "Tokyo" comes back as "Shikinejima" — so the name the user
+used is kept, and the station is mentioned separately only when it genuinely
+differs.
+
+Google is deliberately not scraped: it answers automated requests with a consent
+or CAPTCHA wall, so a Google-backed answer would fail in the user's hands rather
+than in testing.
+
+### Location and time
+
+Every prompt carries the current date, time and timezone, read from this
+computer's clock. No network, and it is what stops a model from calling a
+current-year event "upcoming" because its training data ended earlier.
+
+Location also comes from the device — no IP geolocation service is contacted. It
+is resolved **lazily**, only when a question actually needs a place, then cached
+for the session, so someone who only asks about maths and code never triggers a
+location probe at all.
+
+Ask "what's the current temperature" and Buddy uses your own location without
+being told. Manage models → *Your context* shows what was found, states plainly
+whether it came from regional settings, the OS location service, or from you, and
+lets you correct it.
+
+Precise coordinates require the Windows Location Service, which raises an OS
+consent prompt — so that is a deliberate *Use precise location* click, never a
+side effect of asking a question.
+
+### Provider order
+
+    built-in SearXNG → your API key → public search
+
+Each failure is recorded rather than collapsing into a generic error, and the
+chain is deep enough that a query always reaches *some* provider. If the built-in
+instance is still installing, the request is served by public search and upgrades
+silently once SearXNG is up.
+
+Public search is scraped, so it can be throttled — DuckDuckGo starts answering
+`202` with an anti-bot page instead of results. That is detected explicitly,
+because a challenge page otherwise parses as "zero results" and looks like a query
+that found nothing.
+
+## Licensing and commercial use
+
+Buddy is built to be sold and to run entirely on the user's device. Nothing is
+sent to a server we operate, and a stock build makes **no calls to any
+third-party service**.
+
+### Bundled dependencies — all permissive
+
+| Licence | Packages |
+| --- | --- |
+| MIT | fastapi, pydantic, pydantic-settings, python-docx, openpyxl, anyio, h11, react, react-dom, react-markdown, remark-gfm, vite |
+| BSD-3-Clause | pypdf, numpy, pandas, httpx, uvicorn, starlette, psutil, idna |
+| Apache-2.0 | python-multipart, typescript |
+| PSF | matplotlib |
+| MPL-2.0 | certifi |
+
+No GPL or AGPL code is linked into Buddy. Ollama is MIT; SQLite (and its FTS5
+full-text search) is public domain. All of it may be used, modified and sold
+without restriction.
+
+`certifi` is MPL-2.0, which is weak copyleft at file level: using and shipping it
+is unrestricted, and only modifying that file would require publishing the change.
+
+### Network services — opt-in, never bundled
+
+These are hosted APIs, not libraries, so their **terms of service** apply
+regardless of any licence. Several free tiers forbid commercial use, so Buddy
+calls none of them unless configured:
+
+| Service | Default | Why |
+| --- | --- | --- |
+| **SearXNG** (built in) | **automatic** | Buddy installs and runs it on the user's machine. No third party, no ToS, unlimited. AGPL-3.0, separate process, never linked into Buddy. |
+| **Brave / Tavily API** | opt-in, user's key | Terms are between the user and the provider. Safe to ship. |
+| **wttr.in** (weather) | **on** | Apache-2.0, keyless, no non-commercial clause, self-hostable. |
+| **DuckDuckGo / Mojeek** | fallback only | Scraping breaches their ToS, so it serves only while the built-in instance is unavailable. `ALLOW_SCRAPING_FALLBACK=false` disables it outright. |
+| IP geolocation | **removed** | Free tiers were non-commercial. Replaced with OS APIs. |
+
+Weather works with nothing configured, because wttr.in's licence permits it. Web
+search says what it needs rather than scraping anyway.
+
+`WEATHER_BASE_URL` can point at your own wttr.in instance, which removes the last
+third party from weather answers.
+
+### Location comes from the device
+
+No IP geolocation service is contacted. Three on-device sources, in order:
+
+1. **Manual** — the user typed their city. Always wins.
+2. **Windows Location Service** — real coordinates via
+   `System.Device.Location.GeoCoordinateWatcher`. Raises an OS consent prompt, so
+   it is only attempted when the user clicks *Use precise location*.
+3. **Regional settings** — timezone and home country. No prompt, no network,
+   always available. Coarse, and labelled as such in the UI.
+
+Date, time and timezone always come from the system clock and never leave the
+machine.
+
+### How the built-in search is installed
+
+SearXNG ships as source plus Docker, with no binary release, so Buddy installs it
+from source into `backend/data/searxng`. Three Windows-specific obstacles had to
+be handled, and they are worth knowing about if it ever needs debugging:
+
+| Problem | Why | Fix |
+| --- | --- | --- |
+| No Docker | Only source + container images are published | Clone + dedicated virtualenv |
+| Python 3.14 too new | SearXNG requires ≤ 3.12 | Its venv is built with 3.10–3.12, found via the `py` launcher |
+| `import pwd` | `searx/valkeydb.py` imports a Unix-only module at load time | A shim is written into its venv; Buddy runs with Valkey disabled |
+| Filenames with `:` | Some nginx/uwsgi templates cannot exist on Windows, aborting checkout | `git clone --no-checkout` then a separate checkout, so valid files land |
+| Missing `tzdata` | Windows has no system zoneinfo, so some engines fail to load | `tzdata` is pip-installed into its venv |
+
+It is bound to `127.0.0.1` only, started as a child process, and stopped when
+Buddy exits.
+
+**Licence note.** SearXNG is AGPL-3.0. It runs as a *separate process* reached
+over HTTP — never imported or linked into Buddy — so its licence stays confined to
+that process and Buddy's own code remains yours to license as you choose. It is
+also downloaded on the user's machine at first run rather than redistributed
+inside Buddy, which keeps the two clearly separate.
 
 ## Configuration
 

@@ -93,6 +93,15 @@ _searxng_available: bool | None = None
 _probe_lock = asyncio.Lock()
 
 
+def searxng_base_url() -> str:
+    """The SearXNG to talk to: Buddy's own managed instance, or a configured one."""
+    if settings.searxng_managed:
+        from app.services import searxng_manager
+
+        return searxng_manager.local_url()
+    return settings.searxng_url.rstrip("/")
+
+
 async def _probe_searxng() -> bool:
     """Whether a SearXNG instance answers JSON at the configured URL.
 
@@ -100,7 +109,7 @@ async def _probe_searxng() -> bool:
     the JSON format disabled would pass a naive reachability check and then fail
     every real query.
     """
-    base = settings.searxng_url.rstrip("/")
+    base = searxng_base_url()
     try:
         async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as client:
             response = await client.get(
@@ -116,38 +125,39 @@ async def _probe_searxng() -> bool:
         return False
 
 
-async def searxng_available(force_refresh: bool = False) -> bool:
+async def searxng_available(
+    force_refresh: bool = False, autostart: bool = False
+) -> bool:
+    """Whether SearXNG will answer, optionally starting Buddy's own instance.
+
+    autostart is what makes search work with no setup: the first query that needs
+    the web brings the managed instance up. It is off for plain status checks so
+    that opening a settings panel never triggers an install.
+    """
     global _searxng_available
     if _searxng_available is not None and not force_refresh:
         return _searxng_available
     async with _probe_lock:
         if _searxng_available is not None and not force_refresh:
             return _searxng_available
+
         _searxng_available = await _probe_searxng()
+
+        if not _searxng_available and autostart and settings.searxng_managed:
+            from app.services import searxng_manager
+
+            ok, err = await searxng_manager.start()
+            if ok:
+                _searxng_available = True
+            else:
+                logger.info("managed SearXNG unavailable (%s); using fallback", err)
+
         logger.info(
             "SearXNG at %s: %s",
-            settings.searxng_url,
-            "available" if _searxng_available else "not reachable, using DuckDuckGo",
+            searxng_base_url(),
+            "available" if _searxng_available else "not reachable, falling back",
         )
         return _searxng_available
-
-
-async def internet_reachable() -> bool:
-    """Whether the search endpoint answers at all.
-
-    Probes DuckDuckGo rather than a generic site: reaching example.com proves
-    nothing if the search host specifically is blocked, which is the case on
-    plenty of corporate networks.
-    """
-    try:
-        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as client:
-            response = await client.get(
-                "https://html.duckduckgo.com/html/",
-                headers={"User-Agent": _USER_AGENT},
-            )
-            return response.status_code < 500
-    except Exception:
-        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -156,7 +166,7 @@ async def internet_reachable() -> bool:
 
 
 async def _search_searxng(query: str) -> list[SearchResult]:
-    base = settings.searxng_url.rstrip("/")
+    base = searxng_base_url()
     async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT) as client:
         response = await client.get(
             f"{base}/search",
@@ -167,7 +177,7 @@ async def _search_searxng(query: str) -> list[SearchResult]:
         payload = response.json()
 
     results: list[SearchResult] = []
-    for entry in payload.get("results", [])[:MAX_RESULTS]:
+    for entry in payload.get("results", [])[:MAX_RESULTS]:  # trimmed again by the caller's budget
         url = (entry.get("url") or "").strip()
         title = _clean_text(entry.get("title") or "")
         if not url or not title:
@@ -202,8 +212,14 @@ async def _search_duckduckgo(query: str) -> list[SearchResult]:
             data={"q": query},
             headers={"User-Agent": _USER_AGENT},
         )
-        response.raise_for_status()
         body = response.text
+
+    if _looks_blocked(response.status_code, body):
+        # Rate-limited or challenged. Raising lets the caller try another
+        # provider instead of reporting "no results found", which would wrongly
+        # suggest the query itself was bad.
+        raise SearchError("DuckDuckGo is rate-limiting automated requests.")
+    response.raise_for_status()
 
     titles = list(_DDG_RESULT_RE.finditer(body))
     snippets = [_clean_text(m.group("snippet")) for m in _DDG_SNIPPET_RE.finditer(body)]
@@ -223,6 +239,139 @@ async def _search_duckduckgo(query: str) -> list[SearchResult]:
                 ],
             )
         )
+    return results
+
+
+async def _search_brave(query: str, count: int) -> list[SearchResult]:
+    """Brave Search API. Documented, stable, and its terms permit commercial use.
+
+    The key belongs to the user, so the agreement is between them and Brave -
+    which is what makes this shippable in a paid product, unlike scraping.
+    """
+    async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT) as client:
+        response = await client.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            params={"q": query, "count": min(count, 20)},
+            headers={
+                "Accept": "application/json",
+                "X-Subscription-Token": settings.search_api_key.strip(),
+            },
+        )
+    if response.status_code in (401, 422):
+        raise SearchError(
+            "The Brave Search API key was rejected. Check it in settings."
+        )
+    if response.status_code == 429:
+        raise SearchError("The Brave Search API rate limit was reached.")
+    response.raise_for_status()
+
+    results: list[SearchResult] = []
+    for entry in (response.json().get("web") or {}).get("results", []):
+        results.append(
+            SearchResult(
+                title=_clean_text(entry.get("title") or ""),
+                url=entry.get("url") or "",
+                snippet=_clean_text(entry.get("description") or "")[:MAX_SNIPPET_CHARS],
+            )
+        )
+    return [r for r in results if r.url and r.title]
+
+
+async def _search_tavily(query: str, count: int) -> list[SearchResult]:
+    """Tavily search API - built for LLM use, returns page content directly."""
+    async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT) as client:
+        response = await client.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": settings.search_api_key.strip(),
+                "query": query,
+                "max_results": min(count, 20),
+                "search_depth": "basic",
+            },
+        )
+    if response.status_code in (401, 403):
+        raise SearchError("The Tavily API key was rejected. Check it in settings.")
+    if response.status_code == 429:
+        raise SearchError("The Tavily API rate limit was reached.")
+    response.raise_for_status()
+
+    results: list[SearchResult] = []
+    for entry in response.json().get("results", []):
+        # Tavily returns extracted page text, so a fetch step is unnecessary for
+        # these results - the content is already here.
+        content = (entry.get("content") or "").strip()
+        results.append(
+            SearchResult(
+                title=_clean_text(entry.get("title") or ""),
+                url=entry.get("url") or "",
+                snippet=_clean_text(content)[:MAX_SNIPPET_CHARS],
+                content=content[:MAX_PAGE_CHARS] if len(content) > MAX_SNIPPET_CHARS else None,
+            )
+        )
+    return [r for r in results if r.url and r.title]
+
+
+# DuckDuckGo answers a burst of automated requests with HTTP 202 (or 429) and an
+# anti-bot page instead of results. Detecting that explicitly matters: the body
+# is a valid 200-ish HTML document, so without this check it parses to "zero
+# results" and looks like a query that genuinely found nothing.
+_BLOCK_MARKERS = ("captcha", "unusual traffic", "are you a robot", "challenge-form")
+
+
+def _looks_blocked(status_code: int, body: str) -> bool:
+    if status_code in (202, 429, 403):
+        return True
+    lowered = body[:4000].lower()
+    return any(marker in lowered for marker in _BLOCK_MARKERS)
+
+
+# Mojeek runs its own index and does not rate-limit nearly as aggressively as the
+# big front ends, which makes it a good second opinion when DuckDuckGo throttles.
+_MOJEEK_RESULT_RE = re.compile(
+    r'<a[^>]+class="ob"[^>]+href="(?P<url>[^"]+)"[^>]*>(?P<title>.*?)</a>'
+    r'.*?<p[^>]*class="s"[^>]*>(?P<snippet>.*?)</p>',
+    re.IGNORECASE | re.DOTALL,
+)
+# Mojeek's markup has shifted before; this is a looser second attempt.
+_MOJEEK_FALLBACK_RE = re.compile(
+    r'<h2><a[^>]+href="(?P<url>https?://[^"]+)"[^>]*>(?P<title>.*?)</a></h2>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+async def _search_mojeek(query: str) -> list[SearchResult]:
+    async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT, follow_redirects=True) as client:
+        response = await client.get(
+            "https://www.mojeek.com/search",
+            params={"q": query},
+            headers={"User-Agent": _USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+        )
+    if _looks_blocked(response.status_code, response.text):
+        raise SearchError("Mojeek declined the request.")
+
+    results: list[SearchResult] = []
+    for match in _MOJEEK_RESULT_RE.finditer(response.text):
+        results.append(
+            SearchResult(
+                title=_clean_text(match.group("title")),
+                url=html_module.unescape(match.group("url")),
+                snippet=_clean_text(match.group("snippet"))[:MAX_SNIPPET_CHARS],
+            )
+        )
+        if len(results) >= MAX_RESULTS:
+            break
+
+    if not results:
+        for match in _MOJEEK_FALLBACK_RE.finditer(response.text):
+            results.append(
+                SearchResult(
+                    title=_clean_text(match.group("title")),
+                    url=html_module.unescape(match.group("url")),
+                    snippet="",
+                )
+            )
+            if len(results) >= MAX_RESULTS:
+                break
     return results
 
 
@@ -296,12 +445,23 @@ async def _fetch_page(client: httpx.AsyncClient, result: SearchResult) -> None:
         logger.debug("could not fetch %s", result.url, exc_info=True)
 
 
-async def search(query: str, fetch_pages: bool = True) -> SearchOutcome:
+async def search(
+    query: str,
+    fetch_pages: bool = True,
+    max_results: int | None = None,
+    pages_to_fetch: int | None = None,
+) -> SearchOutcome:
     """Search the web and optionally read the top results.
+
+    max_results and pages_to_fetch come from the query planner, so a one-line
+    factual question costs one request while a comparison reads several pages.
+    They fall back to the module defaults when not supplied.
 
     Raises SearchError only when no provider produced anything - a partial
     result set is a success.
     """
+    result_budget = max_results if max_results is not None else MAX_RESULTS
+    page_budget = pages_to_fetch if pages_to_fetch is not None else PAGES_TO_FETCH
     cleaned = query.strip()
     if not cleaned:
         raise SearchError("The search query was empty.")
@@ -310,33 +470,84 @@ async def search(query: str, fetch_pages: bool = True) -> SearchOutcome:
 
     provider = ""
     results: list[SearchResult] = []
+    failures: list[str] = []
 
-    if await searxng_available():
+    # 1. SearXNG. Self-hosted on the user's own machine: no third party involved,
+    #    no terms of service, no rate limit, unlimited. The preferred option for
+    #    a commercial on-device product.
+    if await searxng_available(autostart=True):
         try:
             results = await _search_searxng(cleaned)
             provider = "searxng"
         except Exception as exc:
             logger.warning("SearXNG search failed, falling back: %s", exc)
-            # A configured instance that errors mid-session should not keep
-            # being preferred for the rest of the session.
+            failures.append(f"SearXNG: {exc}")
             _searxng_available = False
 
-    if not results:
-        try:
-            results = await _search_duckduckgo(cleaned)
-            provider = "duckduckgo"
-        except httpx.HTTPError as exc:
-            raise SearchError(
-                f"Could not reach the search provider: {exc}. Check this machine's "
-                "internet connection."
-            ) from exc
+    # 2. The user's own API key. The agreement is between them and the provider,
+    #    so this is safe to ship commercially.
+    configured = settings.search_provider.strip().lower()
+    if not results and configured and settings.search_api_key.strip():
+        provider_fn = {"brave": _search_brave, "tavily": _search_tavily}.get(configured)
+        if provider_fn is None:
+            failures.append(f"unknown search provider '{configured}'")
+        else:
+            try:
+                results = await provider_fn(cleaned, result_budget)
+                if results:
+                    provider = configured
+            except SearchError as exc:
+                failures.append(f"{configured}: {exc}")
+            except httpx.HTTPError as exc:
+                failures.append(f"{configured}: {exc}")
+
+    # 3. Scraped front ends. Against their terms of service and unfit for a
+    #    commercial build, so this only runs when someone has deliberately turned
+    #    it on for a personal one.
+    if not results and settings.allow_scraping_fallback:
+        for name, scraper in (
+            ("duckduckgo", _search_duckduckgo),
+            ("mojeek", _search_mojeek),
+        ):
+            try:
+                results = await scraper(cleaned)
+                if results:
+                    provider = name
+                    break
+                failures.append(f"{name}: no results")
+            except SearchError as exc:
+                logger.info("%s unavailable: %s", name, exc)
+                failures.append(f"{name}: {exc}")
+            except httpx.HTTPError as exc:
+                logger.info("%s request failed: %s", name, exc)
+                failures.append(f"{name}: {exc}")
+
+    if not results and not failures:
+        # Should be unreachable: SearXNG autostarts and the scraped fallback is on
+        # by default, so at least one provider is always attempted. Kept as a
+        # guard for a build where every provider has been deliberately disabled.
+        raise SearchError(
+            "No search provider is enabled. Turn on the built-in search, or add a "
+            "Brave or Tavily API key in settings."
+        )
 
     if not results:
+        # Distinguish "nobody would answer us" from "the query found nothing" -
+        # they need completely different responses from the user.
+        if failures:
+            raise SearchError(
+                "No search provider would answer right now "
+                f"({'; '.join(failures[:3])}). "
+                "Free search endpoints rate-limit heavy use; try again shortly, or "
+                "run a local SearXNG instance for unthrottled search."
+            )
         raise SearchError(f"No results were found for '{cleaned}'.")
 
+    results = results[:result_budget]
+
     fetched = 0
-    if fetch_pages:
-        targets = results[:PAGES_TO_FETCH]
+    if fetch_pages and page_budget > 0:
+        targets = results[:page_budget]
         async with httpx.AsyncClient(
             timeout=_FETCH_TIMEOUT, follow_redirects=True
         ) as client:

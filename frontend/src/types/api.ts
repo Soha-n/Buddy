@@ -288,3 +288,20 @@ export interface ChatSources {
   provider: string
   citations: SearchCitation[]
 }
+
+/* ------------------------------- User context -------------------------------- */
+
+export interface LocationResponse {
+  city: string | null
+  region: string | null
+  country: string | null
+  timezone: string | null
+  label: string
+  /** How it was determined: typed by the user, the OS location service, OS
+   *  regional settings (country only), or not known. */
+  source: 'manual' | 'os_gps' | 'os_region' | 'unavailable'
+  /** False where the OS cannot give coordinates, so the UI hides that option. */
+  precise_available: boolean
+  local_date: string
+  local_time: string
+}

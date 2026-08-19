@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -11,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.db import init_db
 from app.routers import attachments, capabilities, chat, conversations, models, system
-from app.services import ollama
+from app.services import ollama, searxng_manager
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -20,16 +21,45 @@ logging.basicConfig(
 logger = logging.getLogger("buddy")
 
 
+async def _prepare_search() -> None:
+    """Bring Buddy's own SearXNG up in the background.
+
+    Detached from startup on purpose: the very first run clones a repository and
+    installs dependencies, which takes minutes. Blocking boot on that would make
+    the whole app look hung, and search has a working fallback in the meantime.
+    """
+    try:
+        ok, err = await searxng_manager.start()
+        if ok:
+            logger.info("built-in search ready at %s", searxng_manager.local_url())
+        else:
+            logger.info("built-in search not ready (%s); using fallback for now", err)
+    except Exception:  # noqa: BLE001 - a detached task must never vanish silently
+        logger.exception("preparing built-in search failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Probe Ollama and initialize the conversation database at startup."""
+    """Probe Ollama, initialize the database, and start the built-in search."""
     init_db()
     status = await ollama.get_status()
     if status.running:
         logger.info("Ollama %s reachable at %s", status.version, settings.ollama_base)
     else:
         logger.warning("Ollama not reachable: %s", status.error)
-    yield
+
+    search_task: asyncio.Task | None = None
+    if settings.searxng_managed:
+        search_task = asyncio.create_task(_prepare_search())
+
+    try:
+        yield
+    finally:
+        # Buddy started this process, so Buddy stops it - leaving an orphaned
+        # SearXNG holding the port would break the next run.
+        if search_task is not None and not search_task.done():
+            search_task.cancel()
+        await asyncio.to_thread(searxng_manager.stop)
 
 
 app = FastAPI(
