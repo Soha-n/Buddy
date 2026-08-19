@@ -21,10 +21,20 @@
 param(
     [string]$Version = '1.0.0',
     [switch]$SkipSearxng,
-    [string]$RepoSlug = 'Soha-n/Buddy'
+    [string]$RepoSlug = 'Soha-n/Buddy',
+    # Passed through to build-searxng.ps1; see its help for why it exists.
+    [string]$SearxngPython
 )
 
-$ErrorActionPreference = 'Stop'
+# Not 'Stop': Windows PowerShell turns any stderr output from a native
+# executable into an ErrorRecord, and npm, PyInstaller and cargo all log
+# progress there. Exit codes are checked explicitly after every call instead,
+# which is the only reliable signal from a native process.
+$ErrorActionPreference = 'Continue'
+
+# `throw` still aborts the script regardless of the preference above, so the
+# explicit exit-code checks below remain fatal.
+trap { Write-Host "BUILD FAILED: $_" -ForegroundColor Red; exit 1 }
 
 $root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $build = Join-Path $root 'build'
@@ -49,7 +59,10 @@ finally { Pop-Location }
 
 # --- 2. SearXNG payload -----------------------------------------------------
 if (-not $SkipSearxng) {
-    & (Join-Path $PSScriptRoot 'build-searxng.ps1')
+    $searxngArgs = @{}
+    if ($SearxngPython) { $searxngArgs['PythonPath'] = $SearxngPython }
+    & (Join-Path $PSScriptRoot 'build-searxng.ps1') @searxngArgs
+    if ($LASTEXITCODE -ne 0) { throw 'SearXNG payload build failed' }
 }
 else {
     Write-Host '==> Skipping SearXNG payload' -ForegroundColor Yellow

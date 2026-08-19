@@ -6,6 +6,16 @@
  */
 import type { HealthResponse } from '../types/api'
 
+/**
+ * True when running inside the desktop shell rather than a browser.
+ *
+ * Tauri injects __TAURI_INTERNALS__ into every page it loads, so this
+ * distinguishes the packaged app from `npm run dev` without needing a build
+ * flag that could drift out of sync with how the app was actually launched.
+ */
+const isPackaged =
+  typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+
 interface HealthGateProps {
   health: HealthResponse | null
   loading: boolean
@@ -38,17 +48,26 @@ export function HealthGate({
           <strong>Backend not reachable</strong>
           {error}
         </div>
-        <ol className="fix-steps">
-          <li>
-            Open a terminal in <code>backend/</code>
-          </li>
-          <li>
-            Activate the venv: <code>.\.venv\Scripts\Activate.ps1</code>
-          </li>
-          <li>
-            Run: <code>uvicorn app.main:app --port 8000</code>
-          </li>
-        </ol>
+        {isPackaged ? (
+          // In the desktop app the backend is started by the shell, so there
+          // is nothing for the user to run - restarting is the whole remedy.
+          <p className="muted">
+            Buddy could not start its backend. Close Buddy and open it again. If
+            this keeps happening, reinstalling will restore any missing files.
+          </p>
+        ) : (
+          <ol className="fix-steps">
+            <li>
+              Open a terminal in <code>backend/</code>
+            </li>
+            <li>
+              Activate the venv: <code>.\.venv\Scripts\Activate.ps1</code>
+            </li>
+            <li>
+              Run: <code>python run_server.py</code>
+            </li>
+          </ol>
+        )}
         <button className="primary" onClick={onRetry}>
           Try again
         </button>

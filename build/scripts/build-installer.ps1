@@ -22,7 +22,11 @@ param(
     [string]$Nsis = 'makensis'
 )
 
-$ErrorActionPreference = 'Stop'
+# Not 'Stop': Windows PowerShell turns stderr from a native executable into an
+# ErrorRecord, and git, pip and makensis all log progress there. Exit codes are
+# checked explicitly instead.
+$ErrorActionPreference = 'Continue'
+trap { Write-Host "FAILED: $_" -ForegroundColor Red; exit 1 }
 
 if (-not (Test-Path $ManifestPath)) {
     throw "Manifest not found at $ManifestPath. Run build-all.ps1 first."

@@ -23,21 +23,42 @@
 [CmdletBinding()]
 param(
     [string]$OutDir = (Join-Path $PSScriptRoot '..\payload\searxng'),
-    [string]$Ref = 'master'
+    [string]$Ref = 'master',
+    # Explicit interpreter path, for environments without the py launcher -
+    # GitHub's setup-python action installs Python without registering it.
+    [string]$PythonPath
 )
 
-$ErrorActionPreference = 'Stop'
+# Not 'Stop': Windows PowerShell turns stderr from a native executable into an
+# ErrorRecord, and git, pip and makensis all log progress there. Exit codes are
+# checked explicitly instead.
+$ErrorActionPreference = 'Continue'
+trap { Write-Host "FAILED: $_" -ForegroundColor Red; exit 1 }
 
 Write-Host '==> Building SearXNG payload' -ForegroundColor Cyan
 
 # SearXNG supports 3.10-3.12; newest first, matching searxng_manager.
 $python = $null
-foreach ($version in '3.12', '3.11', '3.10') {
-    $probe = & py "-$version" -c 'import sys; print(sys.executable)' 2>$null
-    if ($LASTEXITCODE -eq 0 -and $probe) { $python = $probe.Trim(); break }
+
+if ($PythonPath) {
+    if (-not (Test-Path $PythonPath)) { throw "PythonPath not found: $PythonPath" }
+    $python = $PythonPath
 }
+else {
+    foreach ($version in '3.12', '3.11', '3.10') {
+        $probe = & py "-$version" -c 'import sys; print(sys.executable)' 2>$null
+        if ($LASTEXITCODE -eq 0 -and $probe) { $python = $probe.Trim(); break }
+    }
+    # Fall back to whatever `python` resolves to, but only if its version is in
+    # range - building the payload with 3.13+ produces one SearXNG cannot run.
+    if (-not $python) {
+        $probe = & python -c 'import sys; print(sys.executable if sys.version_info[:2] in ((3,10),(3,11),(3,12)) else "")' 2>$null
+        if ($probe) { $python = $probe.Trim() }
+    }
+}
+
 if (-not $python) {
-    throw 'No Python 3.10-3.12 found. SearXNG does not support newer versions; install one via py launcher.'
+    throw 'No Python 3.10-3.12 found. SearXNG does not support newer versions. Pass -PythonPath to point at one explicitly.'
 }
 Write-Host "    interpreter: $python"
 

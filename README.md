@@ -22,9 +22,30 @@ then lets you chat with it. Everything runs locally — no data leaves the machi
 6. **Search** — flip the Web toggle on and Buddy decides how much lookup each
    question deserves: none, an API call, snippets, or several full pages.
 
+## Install (desktop app)
+
+Download `Buddy-Setup.exe` from the
+[latest release](https://github.com/Soha-n/Buddy/releases) and run it.
+
+It is a ~130 KB stub that fetches the rest during installation, offers to
+install Ollama if it is missing, and installs per-user, so there is no admin
+prompt. After that Buddy is a normal desktop app — double-click the icon.
+
+The AI model is not part of the download. On first launch Buddy looks at the
+machine, recommends models that will actually run on it, and pulls whichever
+one is picked. Any models already installed through Ollama are detected and
+offered as-is.
+
+Uninstalling leaves conversations and settings in `%LOCALAPPDATA%\Buddy` unless
+removal is confirmed, and never touches models in Ollama's own store.
+
+To build the installer, see [build/README.md](build/README.md).
+
 ## Requirements
 
-- Windows 10/11
+Running the desktop app needs only Windows 10/11 — everything else is handled
+by the installer. Running from source additionally needs:
+
 - [Python 3.11+](https://python.org)
 - [Node.js 18+](https://nodejs.org)
 - [Ollama](https://ollama.com/download) — installed and running
@@ -62,6 +83,10 @@ python -m venv .venv
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
+
+`python run_server.py` also works and is what the packaged app runs. Prefer
+`uvicorn` for development: `run_server.py` can pick a free port, while the dev
+frontend expects the fixed 8000 that `VITE_API_BASE` defaults to.
 
 **Frontend:**
 
@@ -143,8 +168,11 @@ checked for an error and surfaced as a terminal `error` event.
 
 ```
 backend/
+  run_server.py          Packaged entry point: picks a free port, publishes it
+  run_script.py          Entry point for the sandboxed chart interpreter
   app/
-    main.py              FastAPI app, CORS, startup Ollama probe
+    main.py              FastAPI app, CORS, startup Ollama probe, serves the UI
+    paths.py             Bundle resources vs. writable data directory
     config.py            Settings from env / .env
     models/
       schemas.py         Pydantic request/response models
@@ -174,6 +202,15 @@ frontend/
                          useWebSearchStatus, useLocation
     components/          HealthGate, SpecsPanel, ModelCard, ChatView, ...
     types/api.ts         Mirrors of the backend schemas
+desktop/
+  src-tauri/
+    src/main.rs          Starts the backend, waits for it, kills it on exit
+    tauri.conf.json      Window and NSIS bundle settings
+build/
+  backend.spec           PyInstaller spec (backend + chart-runner executables)
+  installer/*.nsi        The web installer stub
+  scripts/*.ps1          Release build pipeline
+  README.md              How packaging works and why
 ```
 
 ## Files in a chat

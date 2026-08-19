@@ -1,0 +1,139 @@
+# Build and publish a Buddy release.
+#
+# Triggered by pushing a v* tag. Produces the payload archives, uploads them as
+# release assets, then compiles the installer stub against the URLs those
+# uploads produced - the stub has to be built last because it pins the assets'
+# real SHA-256 hashes.
+#
+# Everything here runs on GitHub's free tier for public repositories, and
+# release assets are served with no bandwidth charge, which is what makes the
+# distribution free to operate.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual runs build the assets without publishing, for checking a change to
+  # the packaging itself.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (no leading v)"
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF -replace '^refs/tags/v', ''
+          } else {
+            $v = '${{ github.event.inputs.version }}'
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Building version $v"
+
+      # SearXNG supports 3.10-3.12 only, and its payload is built with the
+      # interpreter it will actually run under. Installed first so that the
+      # later setup-python wins as the default `python` - only the explicit
+      # path below is used for SearXNG.
+      - uses: actions/setup-python@v5
+        id: searxng-python
+        with:
+          python-version: "3.12"
+
+      # Buddy's own runtime, and the default `python` for every other step.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Rust builds dominate the run time and change rarely.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Install backend dependencies
+        shell: pwsh
+        run: |
+          python -m venv backend/.venv
+          backend/.venv/Scripts/python.exe -m pip install --upgrade pip
+          backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt
+          backend/.venv/Scripts/python.exe -m pip install pyinstaller
+
+      - name: Build release assets
+        shell: pwsh
+        run: |
+          ./build/scripts/build-all.ps1 `
+            -Version '${{ steps.version.outputs.version }}' `
+            -RepoSlug '${{ github.repository }}' `
+            -SearxngPython '${{ steps.searxng-python.outputs.python-path }}'
+
+      # Publishing before the installer is built is deliberate: the installer
+      # pins asset URLs and hashes, so the assets have to exist first.
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/release/buddy-app-*.zip
+            build/release/searxng-*.zip
+            build/release/manifest.json
+          draft: true
+          generate_release_notes: true
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis --no-progress -y
+          # INetC speaks HTTPS; the bundled NSISdl is plain HTTP only and
+          # cannot fetch from GitHub at all.
+          $plugins = 'C:\Program Files (x86)\NSIS\Plugins\x86-unicode'
+          Invoke-WebRequest -Uri 'https://nsis.sourceforge.io/mediawiki/images/c/c9/Inetc.zip' -OutFile inetc.zip -UseBasicParsing
+          Expand-Archive inetc.zip -DestinationPath inetc -Force
+          Copy-Item 'inetc/Plugins/x86-unicode/INetC.dll' $plugins -Force
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $env:PATH += ';C:\Program Files (x86)\NSIS'
+          ./build/scripts/build-installer.ps1
+
+      - name: Publish installer
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/release/Buddy-Setup-*.exe
+          draft: true
+          generate_release_notes: true
+
+      # Kept for manual runs, where nothing is published but the output still
+      # needs to be inspectable.
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: buddy-${{ steps.version.outputs.version }}
+          path: |
+            build/release/Buddy-Setup-*.exe
+            build/release/manifest.json
+          retention-days: 14
