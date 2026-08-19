@@ -1,0 +1,19 @@
+﻿fastapi==0.141.1
+uvicorn[standard]==0.52.3
+httpx==0.28.1
+psutil==7.2.2
+pydantic==2.13.4
+pydantic-settings==2.15.0
+
+# Multipart form parsing, required by FastAPI for file uploads
+python-multipart==0.0.32
+
+# Document ingestion for chat attachments. Search itself needs nothing
+# extra - it uses SQLite's built-in FTS5.
+pypdf==6.16.1
+python-docx==1.2.0
+openpyxl==3.1.5
+# Data analysis + charting, used by the sandboxed chart runner
+pandas==3.0.5
+matplotlib==3.11.1
+numpy==2.5.2
