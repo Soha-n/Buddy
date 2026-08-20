@@ -27,17 +27,19 @@ then lets you chat with it. Everything runs locally — no data leaves the machi
 Download `Buddy-Setup.exe` from the
 [latest release](https://github.com/Soha-n/Buddy/releases) and run it.
 
-It is a ~130 KB stub that fetches the rest during installation, offers to
-install Ollama if it is missing, and installs per-user, so there is no admin
-prompt. After that Buddy is a normal desktop app — double-click the icon.
+It is a ~130 KB stub that fetches the rest during installation and offers to
+install Ollama if it is missing. Windows asks for admin rights, because Buddy
+installs to `C:\Program Files\Buddy`. After that it is a normal desktop app —
+double-click the icon.
 
 The AI model is not part of the download. On first launch Buddy looks at the
 machine, recommends models that will actually run on it, and pulls whichever
 one is picked. Any models already installed through Ollama are detected and
 offered as-is.
 
-Uninstalling leaves conversations and settings in `%LOCALAPPDATA%\Buddy` unless
-removal is confirmed, and never touches models in Ollama's own store.
+Uninstalling removes the app but keeps your conversations and settings in
+`%LOCALAPPDATA%\Buddy`, and never touches models in Ollama's own store. Delete
+that folder yourself if you want them gone.
 
 To build the installer, see [build/README.md](build/README.md).
 

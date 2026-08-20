@@ -15,9 +15,14 @@ Buddy-Setup-1.0.0.exe   ~130 KB    downloaded by the user
   └── Ollama            ~700 MB    from ollama.com, only if missing
 ```
 
-Installed per-user to `%LOCALAPPDATA%\Programs\Buddy`, so there is no UAC
-prompt. User data lives separately in `%LOCALAPPDATA%\Buddy` and survives
-updates and uninstalls.
+Installed machine-wide to `C:\Program Files\Buddy`, so the installer asks for
+admin rights up front. User data lives separately, per user, in
+`%LOCALAPPDATA%\Buddy` and survives updates and uninstalls - Program Files is
+not writable by a normal user, so nothing the app writes may live there.
+
+Only `Buddy.exe` and `Uninstall.exe` sit at the top level; the backend and its
+dependencies are in `bin\`, so the folder reads as an application rather than an
+unpacked archive.
 
 The AI model is deliberately **not** bundled. Buddy's onboarding picks one that
 fits the machine's actual VRAM and pulls it on first launch; a bundled model
@@ -132,10 +137,16 @@ error record, and npm, PyInstaller, cargo and git all log progress to stderr.
 Every native call checks `$LASTEXITCODE` explicitly instead, with a `trap` to
 make `throw` fatal.
 
-### Silent uninstall never prompts
+### Silent uninstall never prompts, and never deletes user data
 
-`MessageBox` under `/S` has nobody to answer it and hangs forever. The
-uninstaller checks `IfSilent` and keeps user data without asking.
+`MessageBox` under `/S` has nobody to answer it and hangs forever, so the
+uninstaller checks `IfSilent`.
+
+It also never removes `%LOCALAPPDATA%\Buddy`. Running elevated, that path
+resolves to the *administrator's* profile rather than the person who used the
+app, and on a shared machine there may be several copies it cannot reach.
+Deleting the wrong profile's conversations is worse than leaving a few hundred
+megabytes behind, so it reports the location instead.
 
 ### SearXNG cannot be cloned normally on Windows
 
