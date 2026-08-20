@@ -46,7 +46,9 @@ export function HealthGate({
       <div className="center-state">
         <div className="error-box">
           <strong>Backend not reachable</strong>
-          {error}
+          {/* The raw message names a dev command and a fixed port, neither of
+              which means anything in the packaged app. */}
+          {isPackaged ? null : error}
         </div>
         {isPackaged ? (
           // In the desktop app the backend is started by the shell, so there

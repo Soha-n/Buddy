@@ -17,7 +17,7 @@ import type {
   VisionCheckResponse,
   WebSearchStatus,
 } from '../types/api'
-import { apiUrl } from './config'
+import { apiUrl, unreachableMessage } from './config'
 
 async function unwrap<T>(response: Response, path: string): Promise<T> {
   if (!response.ok) {
@@ -39,9 +39,7 @@ async function getJson<T>(path: string): Promise<T> {
   try {
     response = await fetch(apiUrl(path))
   } catch {
-    throw new Error(
-      `Cannot reach the backend at ${apiUrl(path)}. Start it with: uvicorn app.main:app --port 8000`,
-    )
+    throw new Error(unreachableMessage(apiUrl(path)))
   }
   return unwrap<T>(response, path)
 }
@@ -59,7 +57,7 @@ async function sendJson<T>(
       body: body === undefined ? undefined : JSON.stringify(body),
     })
   } catch {
-    throw new Error(`Cannot reach the backend at ${apiUrl(path)}.`)
+    throw new Error(unreachableMessage(apiUrl(path)))
   }
   return unwrap<T>(response, path)
 }
@@ -161,7 +159,7 @@ export async function uploadAttachments(
   try {
     response = await fetch(apiUrl(path), { method: 'POST', body: form })
   } catch {
-    throw new Error(`Cannot reach the backend at ${apiUrl(path)}.`)
+    throw new Error(unreachableMessage(apiUrl(path)))
   }
   return unwrap<UploadResponse>(response, path)
 }

@@ -7,7 +7,7 @@
  * a blank line.
  */
 import type { SseEvent } from '../types/api'
-import { apiUrl } from './config'
+import { apiUrl, unreachableMessage } from './config'
 
 export class StreamAbortedError extends Error {
   constructor() {
@@ -36,9 +36,7 @@ export async function* streamSse(
     })
   } catch (err) {
     if (options.signal?.aborted) throw new StreamAbortedError()
-    throw new Error(
-      `Cannot reach the backend at ${apiUrl(path)}. Is the Python server running?`,
-    )
+    throw new Error(unreachableMessage(apiUrl(path)))
   }
 
   if (!response.ok) {

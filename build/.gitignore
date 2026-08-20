@@ -6,10 +6,11 @@ payload/
 release/
 staging/
 .tools/
+*.zip
 
 # Scratch directories used when testing an assembled build locally.
 apptest/
 installtest/
+e2e/
+relocbase/
 testdata*/
-
-*.zip
