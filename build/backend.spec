@@ -29,6 +29,13 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 BACKEND = Path(SPECPATH).parent / "backend"
 FRONTEND_DIST = Path(SPECPATH).parent / "frontend" / "dist"
 SEARXNG_BUNDLE = Path(SPECPATH).parent / "build" / "payload" / "searxng"
+ICON = Path(SPECPATH).parent / "desktop" / "src-tauri" / "icons" / "icon.ico"
+VERSION_INFO = Path(SPECPATH) / "version_info.txt"
+
+# Blank Properties fields read as unidentified software, and both SmartScreen
+# and antivirus heuristics weigh missing metadata.
+_icon = str(ICON) if ICON.exists() else None
+_version = str(VERSION_INFO) if VERSION_INFO.exists() else None
 
 # matplotlib ships fonts and its matplotlibrc as data, not code; without these
 # it raises at import. pandas needs its submodules collected because much of it
@@ -136,6 +143,8 @@ backend_exe = EXE(
     # Windowed: the shell owns the UI, and a console window appearing behind it
     # looks broken. Startup errors go to the crash log in run_server.py.
     console=False,
+    icon=_icon,
+    version=_version,
 )
 
 # A minimal interpreter for code_runner to spawn. Console-mode because its
@@ -149,7 +158,11 @@ runner_exe = EXE(
     debug=False,
     strip=False,
     upx=False,
+    # Console mode: its stdout and stderr are captured through a pipe, never
+    # shown, and CREATE_NO_WINDOW keeps the window itself hidden.
     console=True,
+    icon=_icon,
+    version=_version,
 )
 
 COLLECT(

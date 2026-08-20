@@ -31,11 +31,30 @@ use tauri::{Manager, WindowEvent};
 /// of native libraries.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// Backend executable, shipped next to this one by the installer.
+/// Backend executable name.
 #[cfg(windows)]
 const BACKEND_EXE: &str = "buddy-backend.exe";
 #[cfg(not(windows))]
 const BACKEND_EXE: &str = "buddy-backend";
+
+/// Subdirectory holding the helper executables.
+///
+/// They live one level down so the install root contains only Buddy.exe and
+/// its uninstaller. A folder full of loose helper binaries reads as an
+/// extracted archive rather than an application.
+const BIN_DIR: &str = "bin";
+
+/// Locate the backend, preferring bin/ and falling back to alongside.
+///
+/// The fallback keeps a plain `cargo build` working, where the sidecar is
+/// copied next to the shell rather than installed.
+fn find_backend(exe_dir: &std::path::Path) -> std::path::PathBuf {
+    let in_bin = exe_dir.join(BIN_DIR).join(BACKEND_EXE);
+    if in_bin.exists() {
+        return in_bin;
+    }
+    exe_dir.join(BACKEND_EXE)
+}
 
 /// Holds the child so it can be killed on exit.
 struct Backend(Mutex<Option<Child>>);
@@ -106,6 +125,29 @@ fn kill_backend(state: &Backend) {
 
 #[cfg(not(windows))]
 fn attach_to_job(_child: &Child) {}
+
+/// Block until the backend answers, or the deadline passes.
+///
+/// Publishing a port is not the same as serving on it: run_server prints
+/// BUDDY_PORT before uvicorn binds, and importing pandas and matplotlib takes
+/// seconds more. Showing the window on the port alone gives the user a
+/// half-rendered app full of connection errors.
+///
+/// Deliberately a plain TCP connect rather than an HTTP request: it needs no
+/// HTTP client in the shell, and "something is accepting connections on this
+/// port" is exactly the condition being waited for.
+fn wait_for_backend(port: u16, deadline: Instant) -> bool {
+    use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    while Instant::now() < deadline {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    false
+}
 
 /// The URL the frontend talks to, resolved at startup.
 struct ApiBase(Mutex<String>);
@@ -196,15 +238,30 @@ fn main() {
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()))
                 .ok_or("could not locate the install directory")?;
 
-            let (child, base) = spawn_backend(exe_dir.join(BACKEND_EXE))?;
+            let (child, base) = spawn_backend(find_backend(&exe_dir))?;
 
             *app.state::<Backend>().0.lock().unwrap() = Some(child);
             *app.state::<ApiBase>().0.lock().unwrap() = base.clone();
 
             // Point the webview at the backend, which serves the UI too, so the
             // app is same-origin and CORS never applies.
+            // The port is in `base` as "http://127.0.0.1:<port>".
+            let port: u16 = base
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse().ok())
+                .ok_or("could not parse the backend port")?;
+
+            if !wait_for_backend(port, Instant::now() + STARTUP_TIMEOUT) {
+                return Err("the backend did not start listening in time".into());
+            }
+
             let window = app.get_webview_window("main").ok_or("no main window")?;
             window.navigate(base.parse().map_err(|e| format!("bad backend url: {e}"))?)?;
+            // Shown only now: the window starts hidden (see tauri.conf.json) so
+            // the user never sees it render against a backend that is not up.
+            window.show()?;
+            window.set_focus()?;
 
             Ok(())
         })

@@ -100,7 +100,14 @@ $staging = Join-Path $build 'staging'
 if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
-Copy-Item (Join-Path $build 'dist\buddy-backend\*') $staging -Recurse -Force
+# Layout matters here. Helper executables go one level down in bin/, so the
+# install root holds only Buddy.exe and its uninstaller - a folder of loose
+# helper binaries reads as an extracted archive rather than an application.
+# main.rs and code_runner both look in bin/ first.
+$bin = Join-Path $staging 'bin'
+New-Item -ItemType Directory -Force -Path $bin | Out-Null
+Copy-Item (Join-Path $build 'dist\buddy-backend\*') $bin -Recurse -Force
+
 Copy-Item (Join-Path $root 'desktop\src-tauri\target\release\buddy-desktop.exe') `
     (Join-Path $staging 'Buddy.exe') -Force
 
@@ -108,7 +115,7 @@ Copy-Item (Join-Path $root 'desktop\src-tauri\target\release\buddy-desktop.exe')
 # frozen, and it does so silently. Checking the staged output is what catches
 # a build that skipped it - shipping without it looks fine until a user's
 # machine turns out to have neither git nor Python to install it at runtime.
-$bundledSearxng = Join-Path $staging '_internal\searxng\src\searx\webapp.py'
+$bundledSearxng = Join-Path $staging 'bin\_internal\searxng\src\searx\webapp.py'
 if (Test-Path $bundledSearxng) {
     Write-Host '    search payload bundled' -ForegroundColor Green
 }

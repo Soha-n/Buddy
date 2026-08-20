@@ -59,10 +59,15 @@ def _interpreter() -> str | None:
     """
     if not IS_FROZEN:
         return sys.executable
-    candidate = install_root() / _RUNNER_EXE
-    if candidate.exists():
-        return str(candidate)
-    logger.error("chart runner interpreter not found at %s", candidate)
+
+    # bin/ first: the installed layout keeps helper executables out of the
+    # install root. Alongside is the fallback for a plain PyInstaller build.
+    root = install_root()
+    for candidate in (root / "bin" / _RUNNER_EXE, root / _RUNNER_EXE):
+        if candidate.exists():
+            return str(candidate)
+
+    logger.error("chart runner interpreter not found under %s", root)
     return None
 
 
