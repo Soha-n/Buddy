@@ -27,6 +27,13 @@ on:
 permissions:
   contents: write
 
+# One release build at a time per ref. Pushing a branch and its tag together
+# can start two runs for the same commit, which then race: both try to install
+# NSIS and create the same release, and one fails on whichever it loses.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
