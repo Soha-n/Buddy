@@ -5,9 +5,15 @@
 ;
 ; Three decisions worth knowing about:
 ;
-; Per-user install (no admin). Everything goes to $LOCALAPPDATA, so there is no
-; UAC prompt and the app can update itself in place. Ollama installs the same
-; way, so a user who has one already has the other in the same place.
+; Machine-wide install into Program Files, which is where Windows expects an
+; application to live and what users recognise. It requires elevation, so the
+; installer asks for admin rights up front.
+;
+; Two consequences worth knowing. Program Files is not writable by a normal
+; user, so nothing the app writes may live there - the database, logs and the
+; search index all go to %LOCALAPPDATA%\Buddy, per user. And an in-place
+; self-update would need elevation too, so updates must run the installer
+; rather than patching the directory.
 ;
 ; INetC rather than NSISdl. NSISdl speaks plain HTTP only; GitHub is HTTPS with
 ; redirects, so it fails at the first hop.
@@ -56,9 +62,10 @@ ManifestDPIAware true
 
 Name "${APP_NAME}"
 OutFile "..\release\Buddy-Setup-${APP_VERSION}.exe"
-; Per-user: no elevation, and self-update works without a prompt.
-InstallDir "$LOCALAPPDATA\Programs\${APP_NAME}"
-RequestExecutionLevel user
+InstallDir "$PROGRAMFILES64\${APP_NAME}"
+; Prompts for elevation before anything runs; writing to Program Files and
+; HKLM both require it.
+RequestExecutionLevel admin
 ShowInstDetails show
 SetCompressor /SOLID lzma
 
@@ -110,13 +117,25 @@ Function .onInit
   ${EndIf}
 
   ; Ollama serves the models. Offer it only when it is actually missing.
+  ; Running elevated, HKCU is the administrator's hive rather than the user's,
+  ; and Ollama installs per-user - so several places have to be checked before
+  ; concluding it is missing.
   StrCpy $InstallOllama "1"
   ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Ollama" "DisplayName"
+  ${If} $0 == ""
+    ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Ollama" "DisplayName"
+  ${EndIf}
   ${If} $0 != ""
     StrCpy $InstallOllama "0"
   ${EndIf}
   IfFileExists "$LOCALAPPDATA\Programs\Ollama\ollama.exe" 0 +2
     StrCpy $InstallOllama "0"
+  ; On PATH is the most reliable signal: it means ollama is usable right now.
+  nsExec::ExecToStack 'cmd /c where ollama'
+  Pop $1
+  ${If} $1 == "0"
+    StrCpy $InstallOllama "0"
+  ${EndIf}
 FunctionEnd
 
 Function ComponentsPageShow
@@ -247,6 +266,9 @@ Section "Buddy" SecMain
     ${EndIf}
   ${EndIf}
 
+  ; All-users locations: the install is machine-wide, so every user
+  ; should see it.
+  SetShellVarContext all
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" "$INSTDIR\Uninstall.exe"
@@ -254,22 +276,23 @@ Section "Buddy" SecMain
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
-  ; HKCU, matching the per-user install: writing to HKLM would need elevation.
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "${APP_NAME}"
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${APP_VERSION}"
-  WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "${APP_PUBLISHER}"
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
-  WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
+  ; HKLM, matching the machine-wide install, so the entry is visible to every
+  ; user rather than only the one who installed.
+  WriteRegStr HKLM "${UNINST_KEY}" "DisplayName" "${APP_NAME}"
+  WriteRegStr HKLM "${UNINST_KEY}" "DisplayVersion" "${APP_VERSION}"
+  WriteRegStr HKLM "${UNINST_KEY}" "Publisher" "${APP_PUBLISHER}"
+  WriteRegStr HKLM "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
+  WriteRegStr HKLM "${UNINST_KEY}" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
   ; What winget and scripted removals invoke; without it they fall back to
   ; the interactive string and hang waiting for a click.
-  WriteRegStr HKCU "${UNINST_KEY}" "QuietUninstallString" "$\"$INSTDIR\Uninstall.exe$\" /S"
-  WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
-  WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
-  WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
+  WriteRegStr HKLM "${UNINST_KEY}" "QuietUninstallString" "$\"$INSTDIR\Uninstall.exe$\" /S"
+  WriteRegStr HKLM "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
+  WriteRegDWORD HKLM "${UNINST_KEY}" "NoModify" 1
+  WriteRegDWORD HKLM "${UNINST_KEY}" "NoRepair" 1
 
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   IntFmt $0 "0x%08X" $0
-  WriteRegDWORD HKCU "${UNINST_KEY}" "EstimatedSize" "$0"
+  WriteRegDWORD HKLM "${UNINST_KEY}" "EstimatedSize" "$0"
 SectionEnd
 
 ; --------------------------------------------------------------------------- ;
@@ -285,22 +308,28 @@ Section "Uninstall"
   nsExec::ExecToLog 'taskkill /F /IM buddy-runner.exe'
   Sleep 1500
 
+  ; Same context the installer used, or these resolve to the wrong user.
+  SetShellVarContext all
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   RMDir "$SMPROGRAMS\${APP_NAME}"
   Delete "$DESKTOP\${APP_NAME}.lnk"
 
   RMDir /r "$INSTDIR"
-  DeleteRegKey HKCU "${UNINST_KEY}"
+  DeleteRegKey HKLM "${UNINST_KEY}"
 
-  ; Conversations and settings are the user's data, not ours to discard
-  ; silently. Models live in Ollama's own store and are never touched.
+  ; Conversations, settings and the search index live per user under
+  ; %LOCALAPPDATA%\Buddy, and this uninstaller runs elevated - so
+  ; $LOCALAPPDATA here is the *administrator's* profile, not necessarily the
+  ; person who used the app. On a shared machine there may be several copies,
+  ; one per user, and none of them is reachable correctly from here.
   ;
-  ; A silent uninstall keeps the data and does not ask: a MessageBox under /S
-  ; has nobody to answer it and would hang the uninstaller indefinitely, which
-  ; is exactly what an unattended run cannot tolerate.
-  IfSilent KeepData
-  MessageBox MB_YESNO|MB_ICONQUESTION "Also delete your ${APP_NAME} conversations, settings and search index?$\r$\n$\r$\nThis frees about 150 MB. Models downloaded through Ollama are kept either way." IDNO KeepData
-    RMDir /r "$LOCALAPPDATA\${APP_NAME}"
-  KeepData:
+  ; Deleting the wrong profile's data is far worse than leaving a few hundred
+  ; megabytes behind, so the uninstaller tells the user where it is instead.
+  ; A silent run says nothing: a MessageBox under /S has nobody to answer it
+  ; and would hang indefinitely.
+  SetShellVarContext current
+  IfSilent SkipDataNotice
+  MessageBox MB_OK|MB_ICONINFORMATION "${APP_NAME} has been removed.$\r$\n$\r$\nYour conversations and settings are kept at:$\r$\n%LOCALAPPDATA%\\${APP_NAME}$\r$\n$\r$\nDelete that folder to remove them (about 150 MB). Models downloaded through Ollama are stored separately and are unaffected."
+  SkipDataNotice:
 SectionEnd
