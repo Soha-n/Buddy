@@ -41,6 +41,14 @@ _version = str(VERSION_INFO) if VERSION_INFO.exists() else None
 # it raises at import. pandas needs its submodules collected because much of it
 # is imported lazily by string name, which the dependency graph cannot see.
 datas = collect_data_files("matplotlib")
+
+# The app's own data files. PyInstaller collects .py modules but not data
+# sitting beside them, so catalog.json - the curated model list every scoring
+# request reads - has to be named explicitly. Without it /api/tiers raises
+# FileNotFoundError and the UI reports "Could not score models".
+for _data_file in (BACKEND / "app").rglob("*.json"):
+    _rel = _data_file.parent.relative_to(BACKEND)
+    datas.append((str(_data_file), str(_rel)))
 hiddenimports = (
     collect_submodules("pandas")
     + collect_submodules("uvicorn")

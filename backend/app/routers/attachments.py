@@ -25,6 +25,7 @@ from app.models.schemas import (
     RunCodeResponse,
     UploadResponse,
 )
+from app.paths import data_root
 from app.services import code_runner, extraction, rag
 
 logger = logging.getLogger(__name__)
@@ -44,9 +45,12 @@ def _uploads_dir() -> Path:
     chart sandbox) are kept. Prose documents are discarded once their text has
     been chunked and embedded.
     """
+    # Beside the database, in the writable data directory. Deriving this from
+    # __file__ would put uploads inside the install directory - Program Files,
+    # which a normal user cannot write to and an update replaces wholesale.
     db_path = Path(settings.db_path)
     if not db_path.is_absolute():
-        db_path = Path(__file__).resolve().parent.parent.parent / db_path
+        db_path = data_root() / db_path
     directory = db_path.parent / "uploads"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
