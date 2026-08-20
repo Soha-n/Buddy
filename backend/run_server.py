@@ -27,8 +27,59 @@ from pathlib import Path
 
 import uvicorn
 
+
+def _ensure_streams() -> None:
+    """Guarantee sys.stdout and sys.stderr exist.
+
+    A windowed build (--noconsole) has no console attached, so both are None.
+    Anything that touches them then raises: uvicorn's log formatter calls
+    sys.stdout.isatty() while configuring itself, which fails before the server
+    binds - leaving a live process that never listens.
+
+    Writing to os.devnull rather than a real file: this output has nowhere
+    useful to go, and the crash log already captures anything fatal.
+    """
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name, None) is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+
+
+def _log_config() -> dict | None:
+    """Logging config for uvicorn, or None to keep its default.
+
+    Frozen, uvicorn's own config is replaced: its formatters are built around a
+    terminal that a windowed build does not have. Logs go to a file in the
+    writable data directory instead, which is also what to ask a user for when
+    something goes wrong.
+    """
+    if not IS_FROZEN:
+        return None
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "plain": {"format": "%(asctime)s %(levelname)-8s %(name)s: %(message)s"},
+        },
+        "handlers": {
+            "file": {
+                "class": "logging.handlers.RotatingFileHandler",
+                "formatter": "plain",
+                "filename": str(logs_dir() / "backend.log"),
+                "maxBytes": 2_000_000,
+                "backupCount": 2,
+                "encoding": "utf-8",
+            },
+        },
+        "root": {"handlers": ["file"], "level": "INFO"},
+        "loggers": {
+            "uvicorn": {"handlers": ["file"], "level": "INFO", "propagate": False},
+            "uvicorn.error": {"handlers": ["file"], "level": "INFO", "propagate": False},
+            "uvicorn.access": {"handlers": ["file"], "level": "WARNING", "propagate": False},
+        },
+    }
+
 from app.config import settings
-from app.paths import ensure_data_root, logs_dir
+from app.paths import IS_FROZEN, ensure_data_root, logs_dir
 
 #: Written next to the database so the shell and any second launch can find it.
 RUNTIME_FILE = "runtime.json"
@@ -55,6 +106,9 @@ def _publish(port: int) -> Path:
 
 
 def main() -> None:
+    # Before anything writes to them, including the port line below.
+    _ensure_streams()
+
     # Port 0 asks for an ephemeral port; anything else is taken literally so a
     # developer can still pin one.
     port = settings.port or _free_port()
@@ -76,6 +130,8 @@ def main() -> None:
         host="127.0.0.1",
         port=port,
         log_level=settings.log_level,
+        # None keeps uvicorn's default, which assumes a terminal.
+        log_config=_log_config(),
         # Reload spawns a child process by re-executing the interpreter, which
         # in a frozen build means launching the whole app again.
         reload=False,
