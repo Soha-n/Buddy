@@ -249,6 +249,7 @@ Section "Buddy" SecMain
 
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+  CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" "$INSTDIR\Uninstall.exe"
   CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
@@ -259,6 +260,9 @@ Section "Buddy" SecMain
   WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "${APP_PUBLISHER}"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
   WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
+  ; What winget and scripted removals invoke; without it they fall back to
+  ; the interactive string and hang waiting for a click.
+  WriteRegStr HKCU "${UNINST_KEY}" "QuietUninstallString" "$\"$INSTDIR\Uninstall.exe$\" /S"
   WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
@@ -282,6 +286,7 @@ Section "Uninstall"
   Sleep 1500
 
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
+  Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   RMDir "$SMPROGRAMS\${APP_NAME}"
   Delete "$DESKTOP\${APP_NAME}.lnk"
 
@@ -295,7 +300,7 @@ Section "Uninstall"
   ; has nobody to answer it and would hang the uninstaller indefinitely, which
   ; is exactly what an unattended run cannot tolerate.
   IfSilent KeepData
-  MessageBox MB_YESNO|MB_ICONQUESTION "Also delete your ${APP_NAME} conversations and settings?$\r$\n$\r$\n(Models downloaded through Ollama are kept either way.)" IDNO KeepData
+  MessageBox MB_YESNO|MB_ICONQUESTION "Also delete your ${APP_NAME} conversations, settings and search index?$\r$\n$\r$\nThis frees about 150 MB. Models downloaded through Ollama are kept either way." IDNO KeepData
     RMDir /r "$LOCALAPPDATA\${APP_NAME}"
   KeepData:
 SectionEnd

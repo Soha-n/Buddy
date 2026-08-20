@@ -451,13 +451,18 @@ async def install() -> tuple[bool, str]:
             _state.installed = True
             return True, ""
         # Prefer the shipped payload; cloning is the source-checkout path.
-        if _adopt_bundle():
-            _state.installed = True
-            logger.info("bundled SearXNG adopted")
-            return True, ""
+        #
+        # Both run in a worker thread and both flag `installing`: adopting the
+        # bundle copies ~110 MB, which blocks the event loop if run inline and
+        # would otherwise be reported to the UI as a failure rather than a wait.
         _state.installing = True
         _state.error = None
         try:
+            adopted = await asyncio.to_thread(_adopt_bundle)
+            if adopted:
+                _state.installed = True
+                logger.info("bundled SearXNG adopted")
+                return True, ""
             ok, err = await asyncio.to_thread(_install_blocking)
         finally:
             _state.installing = False
