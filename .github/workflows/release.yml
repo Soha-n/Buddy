@@ -105,16 +105,65 @@ jobs:
 
       # Publishing before the installer is built is deliberate: the installer
       # pins asset URLs and hashes, so the assets have to exist first.
+      #
+      # draft: false is load-bearing, not a preference. A draft release is not
+      # attached to its tag - GitHub files it under an "untagged-<hash>" slug
+      # and serves no /releases/download/<tag>/ URL at all. Since the installer
+      # pins exactly that URL at compile time, publishing as a draft shipped an
+      # installer whose payload 404s until a human clicks Publish. Every beta up
+      # to and including v1.0.0-beta.7 was broken this way.
+      #
+      # prerelease is set for -alpha/-beta/-rc tags so a pre-release is still
+      # marked as one without going back to a draft.
       - name: Publish release assets
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             build/release/buddy-app-*.zip
-            build/release/searxng-*.zip
             build/release/manifest.json
-          draft: true
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
           generate_release_notes: true
+
+      # The installer is only as good as the URL it pins, and that URL is
+      # asserted at compile time but resolved on a user's machine days later.
+      # Checking it here is what turns "payload 404s mid-install" - which is how
+      # the draft bug above reached users - into a red build.
+      - name: Verify the payload is reachable
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $manifest = Get-Content build/release/manifest.json -Raw | ConvertFrom-Json
+          $url = $manifest.assets.app.url
+          Write-Host "Checking $url"
+
+          # A just-published asset can take a moment to become fetchable, so a
+          # single miss is not yet a failure.
+          $status = 0
+          foreach ($attempt in 1..5) {
+              try {
+                  # Release asset URLs redirect to a CDN host, so follow them.
+                  # -SkipHttpErrorCheck is PowerShell 7+ only; catching the
+                  # terminating error instead keeps this working under either
+                  # PowerShell, so running the step by hand reports a real
+                  # status rather than a parameter-binding error.
+                  $r = Invoke-WebRequest -Method Head -Uri $url -MaximumRedirection 5 -UseBasicParsing
+                  $status = [int]$r.StatusCode
+              }
+              catch {
+                  $resp = $_.Exception.Response
+                  $status = if ($resp) { [int]$resp.StatusCode } else { 0 }
+              }
+              if ($status -eq 200) { break }
+              Write-Host "  attempt $attempt : HTTP $status"
+              Start-Sleep -Seconds 10
+          }
+
+          if ($status -ne 200) {
+              throw "Payload is not reachable at $url (HTTP $status). The installer pins this URL at compile time, so refusing to build an installer that would 404 on a user's machine."
+          }
+          Write-Host "Payload reachable (HTTP 200)" -ForegroundColor Green
 
       - name: Install NSIS
         shell: pwsh
@@ -133,12 +182,18 @@ jobs:
           $env:PATH += ';C:\Program Files (x86)\NSIS'
           ./build/scripts/build-installer.ps1
 
+      # Uploads onto the release the payload step already created, rather than
+      # creating a second one. Two steps that both create a draft each got their
+      # own untagged draft - the run for v1.0.0-beta.7 had to detect and delete
+      # its own duplicate. Publishing against a real tag makes the release
+      # findable, so this step reuses it.
       - name: Publish installer
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: build/release/Buddy-Setup-*.exe
-          draft: true
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
           generate_release_notes: true
 
       # Kept for manual runs, where nothing is published but the output still
