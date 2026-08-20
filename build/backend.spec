@@ -103,32 +103,62 @@ excludes = [
     "pip",
 ]
 
-def _strip_foreign_runtimes(binaries):
-    """Drop Python runtime DLLs that are not the interpreter we froze with.
+def _fix_native_libs(binaries):
+    """Keep native libraries belonging to the interpreter we froze with.
 
-    The build machine may have several Pythons installed - CI installs 3.12 for
-    SearXNG alongside Buddy's 3.14 - and PyInstaller can collect the wrong
-    pythonXY.dll as a dependency of something it scanned. The extra copy then
-    shadows the right one at load time, and the first thing to fail is
-    `import _ssl`: "DLL load failed ... The specified procedure could not be
-    found", because _ssl.pyd is linked against a different runtime.
+    Two ways a foreign copy gets in, both fatal and both silent:
 
-    Nothing else notices, so the app starts, publishes its port and dies - which
-    presents to the user as a backend that never answers.
+    **Wrong pythonXY.dll.** The build machine may have several Pythons - CI
+    installs 3.12 for SearXNG beside Buddy's 3.14 - and an extra runtime DLL
+    shadows the right one at load time.
+
+    **Wrong OpenSSL.** More subtle, and what actually broke v1.0.0-beta.4 and
+    -beta.6. The SearXNG payload under build/payload/ carries its own
+    libssl-3.dll and libcrypto-3.dll from *its* Python 3.11. PyInstaller
+    scanned that directory and collected those instead of 3.14's, so _ssl.pyd
+    was paired with an OpenSSL it was not built against and raised
+    "DLL load failed while importing _ssl: The specified procedure could not be
+    found".
+
+    Neither failure is caught by anything else. run_server publishes its port
+    before uvicorn starts, so the shell sees a healthy handshake and opens a
+    window onto a backend that died during import.
+
+    Both are fixed the same way: for these libraries, take the copy that lives
+    with the running interpreter and discard any other.
     """
     import sys
 
-    keep_tag = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+    keep_runtime = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+
+    # Libraries that must match the interpreter exactly. Resolved from the base
+    # prefix rather than trusted from wherever PyInstaller found them.
+    base = Path(sys.base_prefix)
+    pinned = {}
+    for name in ("libssl-3.dll", "libcrypto-3.dll"):
+        for candidate in (base / "DLLs" / name, base / name):
+            if candidate.exists():
+                pinned[name] = str(candidate)
+                break
+
     cleaned = []
     for entry in binaries:
-        name = Path(entry[0]).name.lower()
+        dest, source = entry[0], entry[1]
+        name = Path(dest).name.lower()
+
         if (
             name.startswith("python")
             and name.endswith(".dll")
-            and name not in (keep_tag, "python3.dll")
+            and name not in (keep_runtime, "python3.dll")
         ):
             print(f"backend.spec: dropping foreign runtime {name}")
             continue
+
+        if name in pinned and Path(source).resolve() != Path(pinned[name]).resolve():
+            print(f"backend.spec: repointing {name} at the interpreter's own copy")
+            cleaned.append((dest, pinned[name], *entry[2:]))
+            continue
+
         cleaned.append(entry)
     return cleaned
 
@@ -145,7 +175,7 @@ analysis = Analysis(
     noarchive=False,
 )
 
-analysis.binaries = _strip_foreign_runtimes(analysis.binaries)
+analysis.binaries = _fix_native_libs(analysis.binaries)
 
 # The runner's own entry point. Without this it would be a duplicate of the
 # server (see the module docstring).
@@ -161,7 +191,7 @@ runner_analysis = Analysis(
     noarchive=False,
 )
 
-runner_analysis.binaries = _strip_foreign_runtimes(runner_analysis.binaries)
+runner_analysis.binaries = _fix_native_libs(runner_analysis.binaries)
 
 # Collect shared dependencies once. The first entry owns the files; the second
 # references them, which is what lets both executables use one _internal dir.

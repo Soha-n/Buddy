@@ -142,6 +142,31 @@ else {
     throw "Expected exactly one Python runtime in the bundle, found: $($runtimes -join ', '). A foreign runtime shadows the real one and breaks _ssl at startup."
 }
 
+# The bundled OpenSSL must be the freezing interpreter's own copy. The SearXNG
+# payload carries libssl/libcrypto from *its* Python, and PyInstaller collected
+# those instead - _ssl.pyd was then paired with an OpenSSL it was not built
+# against and raised "DLL load failed while importing _ssl" at startup. That is
+# what shipped in v1.0.0-beta.4 and -beta.6.
+#
+# Comparing against the interpreter's own file is the only check that does not
+# depend on Python patch version or on which interpreter built the payload.
+$refSsl = & $venvPy -c "import sys, pathlib; base = pathlib.Path(sys.base_prefix); print(next((str(p) for p in (base / 'DLLs' / 'libssl-3.dll', base / 'libssl-3.dll') if p.exists()), ''))"
+if (-not $refSsl) {
+    Write-Host '    WARNING: could not locate the interpreter libssl-3.dll; skipping the OpenSSL check' -ForegroundColor Yellow
+}
+else {
+    $bundledSsl = Join-Path $staging 'bin\_internal\libssl-3.dll'
+    if (-not (Test-Path $bundledSsl)) { throw "libssl-3.dll missing from the bundle" }
+    $refHash = (Get-FileHash $refSsl.Trim() -Algorithm SHA256).Hash
+    $gotHash = (Get-FileHash $bundledSsl -Algorithm SHA256).Hash
+    if ($refHash -eq $gotHash) {
+        Write-Host '    openssl: matches the interpreter' -ForegroundColor Green
+    }
+    else {
+        throw "Bundled libssl-3.dll is not the interpreter's copy. _ssl.pyd will fail to load at startup. Expected $refHash, got $gotHash."
+    }
+}
+
 $appZip = Join-Path $release "buddy-app-$Version.zip"
 if (Test-Path $appZip) { Remove-Item -Force $appZip }
 Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $appZip -CompressionLevel Optimal
