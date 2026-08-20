@@ -103,6 +103,36 @@ excludes = [
     "pip",
 ]
 
+def _strip_foreign_runtimes(binaries):
+    """Drop Python runtime DLLs that are not the interpreter we froze with.
+
+    The build machine may have several Pythons installed - CI installs 3.12 for
+    SearXNG alongside Buddy's 3.14 - and PyInstaller can collect the wrong
+    pythonXY.dll as a dependency of something it scanned. The extra copy then
+    shadows the right one at load time, and the first thing to fail is
+    `import _ssl`: "DLL load failed ... The specified procedure could not be
+    found", because _ssl.pyd is linked against a different runtime.
+
+    Nothing else notices, so the app starts, publishes its port and dies - which
+    presents to the user as a backend that never answers.
+    """
+    import sys
+
+    keep_tag = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+    cleaned = []
+    for entry in binaries:
+        name = Path(entry[0]).name.lower()
+        if (
+            name.startswith("python")
+            and name.endswith(".dll")
+            and name not in (keep_tag, "python3.dll")
+        ):
+            print(f"backend.spec: dropping foreign runtime {name}")
+            continue
+        cleaned.append(entry)
+    return cleaned
+
+
 analysis = Analysis(
     [str(BACKEND / "run_server.py")],
     pathex=[str(BACKEND)],
@@ -114,6 +144,8 @@ analysis = Analysis(
     excludes=excludes,
     noarchive=False,
 )
+
+analysis.binaries = _strip_foreign_runtimes(analysis.binaries)
 
 # The runner's own entry point. Without this it would be a duplicate of the
 # server (see the module docstring).
@@ -128,6 +160,8 @@ runner_analysis = Analysis(
     excludes=excludes,
     noarchive=False,
 )
+
+runner_analysis.binaries = _strip_foreign_runtimes(runner_analysis.binaries)
 
 # Collect shared dependencies once. The first entry owns the files; the second
 # references them, which is what lets both executables use one _internal dir.

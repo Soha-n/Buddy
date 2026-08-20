@@ -27,12 +27,19 @@ on:
 permissions:
   contents: write
 
-# One release build at a time per ref. Pushing a branch and its tag together
-# can start two runs for the same commit, which then race: both try to install
-# NSIS and create the same release, and one fails on whichever it loses.
+# One release build per ref, and never two.
+#
+# Two runs for the same tag do not merely fail one another - they each build
+# their own payload zip, and PyInstaller output is not byte-reproducible, so
+# the second upload replaces a zip whose hash the first run already pinned
+# into the installer. The published installer then rejects the published
+# payload, which is what happened to v1.0.0-beta.3.
+#
+# Queuing the duplicate (cancel-in-progress: false) does not help: it does the
+# same damage, just later. It has to be cancelled outright.
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:

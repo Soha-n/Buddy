@@ -126,6 +126,22 @@ else {
     throw 'Search payload missing from the frozen build. It must be built before PyInstaller runs, since the spec reads it at freeze time.'
 }
 
+# Guard against the failure that broke v1.0.0-beta.4: a foreign pythonXY.dll
+# collected from another interpreter on the build machine shadows the real one,
+# and `import _ssl` then fails at startup. The app publishes its port and dies,
+# which presents as a backend that never answers. backend.spec strips these, so
+# finding more than one here means that strip has regressed.
+$runtimeDir = Join-Path $staging 'bin\_internal'
+$runtimes = @(Get-ChildItem $runtimeDir -Filter 'python*.dll' -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -ne 'python3.dll' } |
+    Select-Object -ExpandProperty Name)
+if ($runtimes.Count -eq 1) {
+    Write-Host "    runtime: $($runtimes[0])" -ForegroundColor Green
+}
+else {
+    throw "Expected exactly one Python runtime in the bundle, found: $($runtimes -join ', '). A foreign runtime shadows the real one and breaks _ssl at startup."
+}
+
 $appZip = Join-Path $release "buddy-app-$Version.zip"
 if (Test-Path $appZip) { Remove-Item -Force $appZip }
 Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $appZip -CompressionLevel Optimal
