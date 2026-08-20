@@ -9,8 +9,8 @@ The user downloads one small installer. It fetches everything else.
 
 ```
 Buddy-Setup-1.0.0.exe   ~130 KB    downloaded by the user
-  ├── buddy-app.zip      ~86 MB    from GitHub Releases
-  ├── searxng.zip       ~60 MB     from GitHub Releases (optional)
+  ├── buddy-app.zip     ~130 MB    from GitHub Releases
+  │                                (backend + shell + UI + SearXNG)
   ├── WebView2            ~2 MB    from Microsoft, only if missing
   └── Ollama            ~700 MB    from ollama.com, only if missing
 ```
@@ -46,8 +46,9 @@ scratch and is gitignored.
 # Everything. Assets land in build/release/.
 ./build/scripts/build-all.ps1 -Version 1.0.0
 
-# Without the search payload: it takes several minutes and needs a Python
-# 3.10-3.12 interpreter. Buddy still runs, using its search fallbacks.
+# Development only. Buddy still runs and search still works via fallbacks, but
+# the private built-in instance will not - an end-user machine has neither git
+# nor Python to install it at runtime. Do not ship a build made this way.
 ./build/scripts/build-all.ps1 -Version 1.0.0 -SkipSearxng
 
 # The installer, after the assets are uploaded and the manifest is final.
@@ -135,6 +136,46 @@ make `throw` fatal.
 
 `MessageBox` under `/S` has nobody to answer it and hangs forever. The
 uninstaller checks `IfSilent` and keeps user data without asking.
+
+### SearXNG cannot be cloned normally on Windows
+
+Its tree contains paths like
+`utils/templates/etc/nginx/default.apps-available/searxng.conf:socket`. A colon
+is not legal in a Windows filename, so a plain `git clone` fails at checkout
+with `invalid path` and leaves nothing usable behind.
+
+`build-searxng.ps1` therefore clones with `--no-checkout`, sets a cone-mode
+sparse checkout, and checks out only `searx`, `searxng_extra`,
+`requirements.txt` and `LICENSE` by pathspec. Two things to preserve if that
+code is touched:
+
+- **No `--filter=blob:none`.** A partial clone leaves the blobs unfetched and
+  the pathspec checkout then fails on unreadable objects.
+- **Never a bare `git checkout <ref>`.** It re-expands the full tree and hits
+  the illegal paths again, whatever the sparse config says.
+
+### The payload ships an embeddable runtime, not a virtualenv
+
+A virtualenv cannot be shipped. Its `python.exe` is a ~270 KB launcher that
+finds the real runtime through `pyvenv.cfg`'s `home`, so it needs the base
+interpreter's DLL and stdlib present on the machine. On a user's machine they
+are not, and the launcher does not error - it **hangs**. Rewriting `pyvenv.cfg`
+does not help, because there is no local runtime to point it at.
+
+So `build-searxng.ps1` downloads Python's **embeddable distribution** (~11 MB,
+self-contained, location-independent) and installs SearXNG's dependencies into
+it with `pip --target`. Two consequences:
+
+- The `python*._pth` file must be deleted. It pins `sys.path` and disables
+  `site-packages`, so the installed dependencies would be unimportable.
+- The interpreter sits at `venv/python.exe`, not `venv/Scripts/python.exe`.
+  `searxng_manager._venv_python` checks both, because a source install still
+  builds a real venv.
+
+The payload is bundled into the app archive by `backend.spec`, which reads
+`build/payload/searxng` **at freeze time** - so it has to be built *before*
+PyInstaller runs. `build-all.ps1` checks the staged output afterwards and fails
+the build if it is missing, because the spec skips it silently.
 
 ## Licensing
 

@@ -504,9 +504,13 @@ machine.
 
 ### How the built-in search is installed
 
-SearXNG ships as source plus Docker, with no binary release, so Buddy installs it
-from source into `backend/data/searxng`. Three Windows-specific obstacles had to
-be handled, and they are worth knowing about if it ever needs debugging:
+SearXNG ships as source plus Docker, with no binary release. The **desktop app
+ships it prebuilt** inside the installer and copies it into place on first run,
+because an end-user machine has neither git nor a suitable Python to build it.
+Run from source, Buddy still installs it itself into `backend/data/searxng`.
+
+Either way the same Windows-specific obstacles had to be handled, and they are
+worth knowing about if it ever needs debugging:
 
 | Problem | Why | Fix |
 | --- | --- | --- |
@@ -521,9 +525,13 @@ Buddy exits.
 
 **Licence note.** SearXNG is AGPL-3.0. It runs as a *separate process* reached
 over HTTP — never imported or linked into Buddy — so its licence stays confined to
-that process and Buddy's own code remains yours to license as you choose. It is
-also downloaded on the user's machine at first run rather than redistributed
-inside Buddy, which keeps the two clearly separate.
+that process and Buddy's own code remains yours to license as you choose.
+
+Note that the desktop installer *does* redistribute SearXNG's source, which is a
+distribution event under the AGPL: that release must carry SearXNG's licence
+(the build copies it in as `LICENSE-SEARXNG`) and offer its source. Running from
+source downloads it on the user's machine instead, which keeps the two
+separate.
 
 ## Configuration
 

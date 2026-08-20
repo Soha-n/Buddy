@@ -4,18 +4,30 @@ SearXNG is the only search backend that is simultaneously free, unlimited,
 private and safe to ship in a commercial product - so Buddy runs its own rather
 than asking the user to set one up. This module makes that automatic:
 
-1. On first run, clone the source and install it into a dedicated virtualenv.
+1. On first run, put a working copy in place: adopt the prebuilt payload the
+   installer shipped, or - running from source - clone and build it here.
 2. On every start, launch it as a child process bound to loopback.
 3. Keep it supervised, and stop it when Buddy exits.
 
-Three Windows-specific problems had to be solved, none of them obvious:
+Several Windows-specific problems had to be solved, none of them obvious:
 
 **No Docker.** The official distribution is source + Docker only, with no binary
-release. So this installs from source into its own venv, which also keeps
-SearXNG's pinned dependencies away from Buddy's.
+release. So a source checkout installs from source into its own venv, which also
+keeps SearXNG's pinned dependencies away from Buddy's.
 
-**Python version.** SearXNG requires <= 3.12 while Buddy runs on 3.14, so the venv
-is built with a separate interpreter located through the `py` launcher.
+**Python version.** SearXNG requires <= 3.12 while Buddy runs on 3.14, so its
+interpreter is separate - located through the `py` launcher for a source
+install, and shipped inside the payload for a packaged one.
+
+**Nothing to build with.** A packaged install has neither git nor Python, so the
+from-source path cannot run at all. The installer therefore ships SearXNG
+prebuilt and `_adopt_bundle` copies it into place.
+
+**Virtualenvs are not shippable.** A venv's python.exe is a small launcher that
+resolves the real runtime through pyvenv.cfg, so it needs a base Python
+installed on the machine and merely hangs without one. The payload therefore
+carries Python's *embeddable* distribution, which is self-contained and
+location-independent - see `_venv_python`.
 
 **`import pwd`.** searx/valkeydb.py imports the Unix-only `pwd` module at import
 time, which is an immediate ModuleNotFoundError on Windows. A small shim is
@@ -62,9 +74,6 @@ _BIND_ADDRESS = "127.0.0.1"
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-#: pyvenv.cfg is newline-delimited regardless of platform.
-NEWLINE = "\n"
-
 
 @dataclass
 class ManagerState:
@@ -104,7 +113,20 @@ def _source_dir() -> Path:
 
 
 def _venv_python() -> Path:
-    return _root() / "venv" / "Scripts" / "python.exe"
+    """Interpreter that runs SearXNG.
+
+    Two layouts have to work. A source install builds a real virtualenv, whose
+    interpreter lives in ``venv/Scripts``. The packaged build instead ships
+    Python's *embeddable* distribution, which is a flat directory with
+    ``python.exe`` at its root - a virtualenv could not be shipped, because its
+    launcher resolves the runtime through ``pyvenv.cfg`` and needs a base Python
+    installed on the machine.
+    """
+    root = _root() / "venv"
+    embedded = root / "python.exe"
+    if embedded.exists():
+        return embedded
+    return root / "Scripts" / "python.exe"
 
 
 def _settings_file() -> Path:
@@ -270,35 +292,14 @@ def _adopt_bundle() -> bool:
             logger.warning("copying bundled SearXNG %s failed: %s", name, exc)
             return False
 
-    # A venv records absolute paths from build time; on a user's machine those
-    # point at the build agent. Rewriting pyvenv.cfg keeps the interpreter
-    # resolvable after the move.
-    _repair_venv_paths(root / "venv")
+    # No path repair needed: the shipped runtime is Python's embeddable
+    # distribution, which is fully self-contained and location-independent.
+    #
+    # Settings still have to be generated: the bundle deliberately ships
+    # without a secret key, and SearXNG exits rather than start with the
+    # default one.
+    _write_settings()
     return is_installed()
-
-
-def _repair_venv_paths(venv: Path) -> None:
-    """Rewrite a relocated venv's recorded home so its interpreter still runs."""
-    cfg = venv / "pyvenv.cfg"
-    if not cfg.exists():
-        return
-    try:
-        lines = cfg.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return
-    scripts = venv / "Scripts"
-    rewritten = []
-    for line in lines:
-        if line.lower().startswith("home ="):
-            rewritten.append(f"home = {scripts}")
-        elif line.lower().startswith("executable ="):
-            rewritten.append(f"executable = {scripts / 'python.exe'}")
-        else:
-            rewritten.append(line)
-    try:
-        cfg.write_text(NEWLINE.join(rewritten) + NEWLINE, encoding="utf-8")
-    except OSError as exc:
-        logger.warning("repairing venv paths failed: %s", exc)
 
 
 def _run(
@@ -319,6 +320,29 @@ def _run(
         tail = (completed.stderr or completed.stdout or "").strip().splitlines()
         return False, "\n".join(tail[-6:]) if tail else f"exit {completed.returncode}"
     return True, ""
+
+
+def _write_settings() -> None:
+    """Write settings.yml if absent, with a freshly generated secret key.
+
+    SearXNG refuses to start while server.secret_key is still the packaged
+    default - it exits rather than warning - so this has to happen on every
+    install path, the prebuilt bundle included.
+
+    Never overwritten once present: it is the user's file to edit.
+    """
+    target = _settings_file()
+    if target.exists():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        _SETTINGS_TEMPLATE.format(
+            secret=secrets.token_hex(32),
+            bind=_BIND_ADDRESS,
+            port=settings.searxng_port,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _install_blocking() -> tuple[bool, str]:
@@ -415,15 +439,7 @@ def _install_blocking() -> tuple[bool, str]:
         shim_target.parent.mkdir(parents=True, exist_ok=True)
         shim_target.write_text(_PWD_SHIM, encoding="utf-8")
 
-    if not _settings_file().exists():
-        _settings_file().write_text(
-            _SETTINGS_TEMPLATE.format(
-                secret=secrets.token_hex(32),
-                bind=_BIND_ADDRESS,
-                port=settings.searxng_port,
-            ),
-            encoding="utf-8",
-        )
+    _write_settings()
 
     return True, ""
 

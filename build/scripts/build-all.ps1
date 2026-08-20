@@ -5,9 +5,11 @@
 .DESCRIPTION
     Produces, into build/release/:
 
-        buddy-app-<version>.zip     shell + backend + bundled UI
-        searxng-<version>.zip       prebuilt search payload (optional)
-        manifest.json               sizes and SHA-256 for each asset
+        buddy-app-<version>.zip     shell + backend + UI + search payload
+        manifest.json               size and SHA-256 for the asset
+
+    One archive, so installing is a single verified download. SearXNG is bundled
+    into it by backend.spec rather than shipped separately.
 
     The installer stub pins exact URLs and hashes from the manifest rather than
     resolving "latest" at install time, so an installer already in a user's
@@ -15,7 +17,9 @@
 
 .PARAMETER SkipSearxng
     Skip the search payload. It takes several minutes and needs a Python
-    3.10-3.12 interpreter; the app runs without it via its search fallbacks.
+    3.10-3.12 interpreter. The app still runs and search still works, via the
+    fallbacks in websearch.py - but private out-of-the-box search does not,
+    so release builds should not use this.
 #>
 [CmdletBinding()]
 param(
@@ -100,17 +104,25 @@ Copy-Item (Join-Path $build 'dist\buddy-backend\*') $staging -Recurse -Force
 Copy-Item (Join-Path $root 'desktop\src-tauri\target\release\buddy-desktop.exe') `
     (Join-Path $staging 'Buddy.exe') -Force
 
+# The spec adds the search payload only if it existed when the backend was
+# frozen, and it does so silently. Checking the staged output is what catches
+# a build that skipped it - shipping without it looks fine until a user's
+# machine turns out to have neither git nor Python to install it at runtime.
+$bundledSearxng = Join-Path $staging '_internal\searxng\src\searx\webapp.py'
+if (Test-Path $bundledSearxng) {
+    Write-Host '    search payload bundled' -ForegroundColor Green
+}
+elseif ($SkipSearxng) {
+    Write-Host '    WARNING: no search payload (-SkipSearxng). Private search will not work on an end-user machine.' -ForegroundColor Yellow
+}
+else {
+    throw 'Search payload missing from the frozen build. It must be built before PyInstaller runs, since the spec reads it at freeze time.'
+}
+
 $appZip = Join-Path $release "buddy-app-$Version.zip"
 if (Test-Path $appZip) { Remove-Item -Force $appZip }
 Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $appZip -CompressionLevel Optimal
 
-$searxZip = $null
-$searxDir = Join-Path $payload 'searxng'
-if (Test-Path $searxDir) {
-    $searxZip = Join-Path $release "searxng-$Version.zip"
-    if (Test-Path $searxZip) { Remove-Item -Force $searxZip }
-    Compress-Archive -Path (Join-Path $searxDir '*') -DestinationPath $searxZip -CompressionLevel Optimal
-}
 
 # --- 6. Manifest ------------------------------------------------------------
 # SHA-256 per asset: the installer verifies before extracting, so a truncated
@@ -128,8 +140,10 @@ function New-AssetEntry($path) {
     }
 }
 
+# One asset only. SearXNG is bundled inside the app payload by backend.spec
+# rather than shipped separately, so there is nothing else to download and the
+# installer stays a single-fetch flow.
 $assets = [ordered]@{ app = New-AssetEntry $appZip }
-if ($searxZip) { $assets.searxng = New-AssetEntry $searxZip }
 
 $manifest = [ordered]@{
     version = $Version

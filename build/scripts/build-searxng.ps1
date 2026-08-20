@@ -24,6 +24,9 @@
 param(
     [string]$OutDir = (Join-Path $PSScriptRoot '..\payload\searxng'),
     [string]$Ref = 'master',
+    # Must be a version SearXNG supports (3.10-3.12). Shipped as the payload's
+    # runtime, so it is what SearXNG actually executes on the user's machine.
+    [string]$EmbedVersion = '3.11.9',
     # Explicit interpreter path, for environments without the py launcher -
     # GitHub's setup-python action installs Python without registering it.
     [string]$PythonPath
@@ -69,32 +72,86 @@ if (Test-Path $OutDir) { Remove-Item -Recurse -Force $OutDir }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 Write-Host '    cloning source...'
-# Shallow: the payload needs the tree, not the history.
-& git clone --depth 1 --branch $Ref https://github.com/searxng/searxng.git $src
+# SearXNG's tree contains 'utils/templates/etc/httpd/.../searxng.conf:socket',
+# and a colon is not a legal character in a Windows filename - a plain clone
+# fails at checkout with "invalid path". So the clone is done without a working
+# tree, then a sparse checkout pulls only what the payload actually runs, which
+# excludes utils/ entirely.
+#
+# Shallow throughout: the payload needs the tree, not the history.
+# No --filter=blob:none: the pathspec checkout below needs the blobs locally,
+# and a partial clone makes it fail on unreadable objects instead.
+& git clone --depth 1 --branch $Ref --no-checkout `
+    https://github.com/searxng/searxng.git $src
 if ($LASTEXITCODE -ne 0) { throw 'git clone failed' }
+
+Push-Location $src
+try {
+    # Cone mode keeps this to whole directories, which is all that is needed.
+    & git sparse-checkout init --cone
+    if ($LASTEXITCODE -ne 0) { throw 'git sparse-checkout init failed' }
+
+    # searx/ is the application; the rest are what its install and runtime read.
+    & git sparse-checkout set searx searxng_extra
+    if ($LASTEXITCODE -ne 0) { throw 'git sparse-checkout set failed' }
+
+    # Restricted to the sparse paths and the few root files needed. A bare
+    # `git checkout $Ref` would re-expand the whole tree and hit the illegal
+    # paths again regardless of the sparse config.
+    & git checkout $Ref -- searx searxng_extra requirements.txt LICENSE
+    if ($LASTEXITCODE -ne 0) { throw 'git checkout failed' }
+}
+finally { Pop-Location }
+if (-not (Test-Path (Join-Path $src 'requirements.txt'))) {
+    throw 'requirements.txt missing after checkout - cannot install dependencies'
+}
 
 # Drop the clone's own .git - it is ~100 MB of history the payload never needs.
 $dotGit = Join-Path $src '.git'
 if (Test-Path $dotGit) { Remove-Item -Recurse -Force $dotGit }
 
-Write-Host '    creating venv...'
-& $python -m venv $venv
-if ($LASTEXITCODE -ne 0) { throw 'venv creation failed' }
+# A virtualenv is NOT usable here. Its python.exe is a ~270 KB launcher that
+# resolves the real runtime through pyvenv.cfg's `home`, so it needs the base
+# interpreter's DLL and stdlib to exist on the machine. On an end-user machine
+# they do not, and the launcher simply hangs. Rewriting pyvenv.cfg does not
+# help - there is no local runtime for it to point at.
+#
+# The embeddable distribution is the fix: a self-contained ~11 MB runtime with
+# its own python.dll and a zipped stdlib, explicitly designed to be shipped
+# inside an application. Dependencies are installed into it with --target,
+# since it has no venv machinery.
+Write-Host '    downloading embeddable runtime...'
+$embedZip = Join-Path $OutDir 'embed.zip'
+$embedUrl = "https://www.python.org/ftp/python/$EmbedVersion/python-$EmbedVersion-embed-amd64.zip"
+Invoke-WebRequest -Uri $embedUrl -OutFile $embedZip -UseBasicParsing
+Expand-Archive -LiteralPath $embedZip -DestinationPath $venv -Force
+Remove-Item -Force $embedZip
 
-$venvPy = Join-Path $venv 'Scripts\python.exe'
+$venvPy = Join-Path $venv 'python.exe'
+if (-not (Test-Path $venvPy)) { throw "embeddable runtime missing python.exe at $venvPy" }
+
+# The embeddable build ships a ._pth file that pins sys.path and disables
+# site-packages entirely. Removing it restores normal path handling so the
+# site-packages directory below is importable.
+Get-ChildItem -Path $venv -Filter '*._pth' | Remove-Item -Force
+
+$sitePackages = Join-Path $venv 'Lib\site-packages'
+New-Item -ItemType Directory -Force -Path $sitePackages | Out-Null
 
 Write-Host '    installing dependencies (slow)...'
-& $venvPy -m pip install --quiet --upgrade pip
-& $venvPy -m pip install --quiet -r (Join-Path $src 'requirements.txt')
+# No pip in the embeddable build, so it is bootstrapped from the build
+# machine's interpreter and told to install into the payload.
+& $python -m pip install --quiet --upgrade --target $sitePackages pip
+& $python -m pip install --quiet --target $sitePackages -r (Join-Path $src 'requirements.txt')
 if ($LASTEXITCODE -ne 0) { throw 'dependency install failed' }
 # Not in requirements.txt, but searx needs it for timezone data on Windows.
-& $venvPy -m pip install --quiet tzdata
+& $python -m pip install --quiet --target $sitePackages tzdata
+if ($LASTEXITCODE -ne 0) { throw 'tzdata install failed' }
 
 # searx/valkeydb.py does `import pwd` at import time, which is an immediate
 # ModuleNotFoundError on Windows. Buddy runs with Valkey disabled, so the shim
 # only ever has to satisfy the import.
 Write-Host '    writing pwd shim...'
-$sitePackages = Join-Path $venv 'Lib\site-packages'
 $shim = @'
 """Minimal `pwd` stand-in for Windows.
 
