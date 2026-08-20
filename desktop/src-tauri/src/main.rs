@@ -149,15 +149,6 @@ fn wait_for_backend(port: u16, deadline: Instant) -> bool {
     false
 }
 
-/// The URL the frontend talks to, resolved at startup.
-struct ApiBase(Mutex<String>);
-
-/// Exposed to the frontend so it can target the port the backend actually got.
-#[tauri::command]
-fn api_base(state: tauri::State<ApiBase>) -> String {
-    state.0.lock().map(|v| v.clone()).unwrap_or_default()
-}
-
 /// Spawn the backend and read the port it prints.
 ///
 /// Returns the base URL. Reading stdout rather than scanning ports is what
@@ -229,8 +220,6 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(Backend(Mutex::new(None)))
-        .manage(ApiBase(Mutex::new(String::new())))
-        .invoke_handler(tauri::generate_handler![api_base])
         .setup(|app| {
             // Sidecar lives beside this executable in an installed build.
             let exe_dir = std::env::current_exe()
@@ -241,7 +230,6 @@ fn main() {
             let (child, base) = spawn_backend(find_backend(&exe_dir))?;
 
             *app.state::<Backend>().0.lock().unwrap() = Some(child);
-            *app.state::<ApiBase>().0.lock().unwrap() = base.clone();
 
             // Point the webview at the backend, which serves the UI too, so the
             // app is same-origin and CORS never applies.
