@@ -72,6 +72,8 @@ SetCompressor /SOLID lzma
 Var InstallOllama
 Var NeedsWebView2
 Var OllamaCheckbox
+; Set at install time when Buddy installed Ollama; read by the uninstaller.
+Var BuddyOwnsOllama
 
 !define MUI_ABORTWARNING
 !define MUI_ICON "..\..\desktop\src-tauri\icons\icon.ico"
@@ -258,8 +260,21 @@ Section "Buddy" SecMain
     Pop $0
     ${If} $0 == "OK"
       DetailPrint "Installing Ollama..."
-      ExecWait '"$PLUGINSDIR\OllamaSetup.exe" /VERYSILENT /NORESTART' $1
+      ; /S, not /VERYSILENT. OllamaSetup.exe is an NSIS installer, which does
+      ; not recognise Inno Setup's switch and silently ignored it - so it ran
+      ; its full UI and then launched its tray app over the top of ours, in the
+      ; middle of our install. /S is the NSIS silent switch it does honour.
+      ExecWait '"$PLUGINSDIR\OllamaSetup.exe" /S' $1
       DetailPrint "Ollama installer finished ($1)"
+      ; Ollama starts itself after installing. Nothing needs it until the user
+      ; picks a model, and leaving it running mid-install puts a tray icon and
+      ; a window in front of the person still using our wizard.
+      nsExec::ExecToLog 'taskkill /F /IM "ollama app.exe"'
+      nsExec::ExecToLog 'taskkill /F /IM ollama.exe'
+      ; Remember that Buddy is what put Ollama on this machine, so the
+      ; uninstaller can remove it without touching an installation that was
+      ; already here. Written under our own key, which the uninstaller deletes.
+      WriteRegDWORD HKLM "${UNINST_KEY}" "BuddyInstalledOllama" 1
     ${Else}
       DetailPrint "Ollama download failed ($0)"
       MessageBox MB_ICONEXCLAMATION "Ollama could not be downloaded. Buddy will still install, but you will need to install Ollama from ollama.com before you can chat."
@@ -315,21 +330,49 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\${APP_NAME}"
   Delete "$DESKTOP\${APP_NAME}.lnk"
 
+  ; Read before the key is deleted: this is the only record of whether Buddy
+  ; is what put Ollama on this machine, and the next line destroys it.
+  ReadRegDWORD $BuddyOwnsOllama HKLM "${UNINST_KEY}" "BuddyInstalledOllama"
+
   RMDir /r "$INSTDIR"
   DeleteRegKey HKLM "${UNINST_KEY}"
 
-  ; Conversations, settings and the search index live per user under
-  ; %LOCALAPPDATA%\Buddy, and this uninstaller runs elevated - so
-  ; $LOCALAPPDATA here is the *administrator's* profile, not necessarily the
-  ; person who used the app. On a shared machine there may be several copies,
-  ; one per user, and none of them is reachable correctly from here.
+  ; --- Buddy's own data ---------------------------------------------------- ;
   ;
-  ; Deleting the wrong profile's data is far worse than leaving a few hundred
-  ; megabytes behind, so the uninstaller tells the user where it is instead.
-  ; A silent run says nothing: a MessageBox under /S has nobody to answer it
-  ; and would hang indefinitely.
-  SetShellVarContext current
-  IfSilent SkipDataNotice
-  MessageBox MB_OK|MB_ICONINFORMATION "${APP_NAME} has been removed.$\r$\n$\r$\nYour conversations and settings are kept at:$\r$\n%LOCALAPPDATA%\\${APP_NAME}$\r$\n$\r$\nDelete that folder to remove them (about 150 MB). Models downloaded through Ollama are stored separately and are unaffected."
-  SkipDataNotice:
+  ; Conversations, settings and the search index live per user under
+  ; %LOCALAPPDATA%\Buddy. This uninstaller runs elevated, so $LOCALAPPDATA is
+  ; the *administrator's* profile rather than the person who used the app - and
+  ; on a shared machine there may be one copy per user. Removing only the
+  ; elevated profile's copy would leave the real data behind on exactly the
+  ; machines where it matters most.
+  ;
+  ; So every profile is walked. The helper scripts are extracted to $PLUGINSDIR
+  ; rather than run from $INSTDIR, which no longer exists by this point, and
+  ; NSIS deletes that directory itself when the uninstaller exits.
+  ;
+  ; They are separate .ps1 files because quoting a script of this length inside
+  ; an NSIS single-quoted string means escaping quotes through two layers, and
+  ; a mistake there fails silently at uninstall time - the worst place to find
+  ; one.
+  DetailPrint "Removing ${APP_NAME} data..."
+  File "/oname=$PLUGINSDIR\purge-data.ps1" "purge-data.ps1"
+  nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\purge-data.ps1"'
+  Pop $0
+
+  ; --- Ollama -------------------------------------------------------------- ;
+  ;
+  ; Only when Buddy installed it. A pre-existing Ollama may be serving other
+  ; applications, and its models are tens of gigabytes the user did not ask us
+  ; to discard - so an installation we did not create is left alone.
+  ${If} $BuddyOwnsOllama == 1
+    DetailPrint "Removing Ollama (installed by ${APP_NAME})..."
+    nsExec::ExecToLog 'taskkill /F /IM "ollama app.exe"'
+    nsExec::ExecToLog 'taskkill /F /IM ollama.exe'
+    Sleep 1000
+    File "/oname=$PLUGINSDIR\purge-ollama.ps1" "purge-ollama.ps1"
+    nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\purge-ollama.ps1"'
+    Pop $0
+  ${Else}
+    DetailPrint "Leaving Ollama installed (it was already on this machine)."
+  ${EndIf}
 SectionEnd

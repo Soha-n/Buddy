@@ -139,7 +139,40 @@ if ($runtimes.Count -eq 1) {
     Write-Host "    runtime: $($runtimes[0])" -ForegroundColor Green
 }
 else {
-    throw "Expected exactly one Python runtime in the bundle, found: $($runtimes -join ', '). A foreign runtime shadows the real one and breaks _ssl at startup."
+    throw "Expected exactly one Python runtime at the bundle root, found: $($runtimes -join ', '). A foreign runtime shadows the real one and breaks _ssl at startup."
+}
+
+# The search payload runs under its own embeddable interpreter, which needs its
+# runtime DLL sitting beside python.exe. The check above is deliberately
+# non-recursive - it guards the bundle root, where a second runtime would
+# shadow ours - so it cannot see whether the payload's own runtime survived.
+#
+# That gap is what shipped v1.0.0-beta.8: backend.spec stripped the payload's
+# python311.dll as a "foreign runtime", every guard passed, and the failure
+# surfaced only when a user clicked a model - a "python311.dll was not found"
+# dialog from an interpreter with no runtime. So the payload is now checked on
+# its own terms: python.exe and a matching pythonXY.dll, together.
+$searxngVenv = Join-Path $staging 'bin\_internal\searxng\venv'
+if (Test-Path (Join-Path $searxngVenv 'python.exe')) {
+    $payloadRuntimes = @(Get-ChildItem $searxngVenv -Filter 'python*.dll' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne 'python3.dll' } |
+        Select-Object -ExpandProperty Name)
+    if ($payloadRuntimes.Count -ne 1) {
+        $found = if ($payloadRuntimes) { $payloadRuntimes -join ', ' } else { 'none' }
+        throw "The search payload ships python.exe but $($payloadRuntimes.Count) runtime DLLs ($found). Its interpreter cannot start without exactly one, and search fails with 'python311.dll was not found'."
+    }
+    # Its OpenSSL must be its own, not ours: _ssl.pyd built against 3.11 fails
+    # to load against 3.14's libssl, which is the same class of bug one layer
+    # down from the runtime itself.
+    foreach ($lib in 'libssl-3.dll', 'libcrypto-3.dll') {
+        if (-not (Test-Path (Join-Path $searxngVenv $lib))) {
+            throw "The search payload is missing $lib. Its interpreter cannot import _ssl, so SearXNG cannot make HTTPS requests."
+        }
+    }
+    Write-Host "    search runtime: $($payloadRuntimes[0]) (+ own openssl)" -ForegroundColor Green
+}
+elseif (-not $SkipSearxng) {
+    throw 'The search payload has no python.exe. Its embeddable interpreter did not survive the freeze, so search cannot start on a user machine.'
 }
 
 # The bundled OpenSSL must be the freezing interpreter's own copy. The SearXNG

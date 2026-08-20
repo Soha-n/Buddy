@@ -126,6 +126,22 @@ def _fix_native_libs(binaries):
 
     Both are fixed the same way: for these libraries, take the copy that lives
     with the running interpreter and discard any other.
+
+    **Only at the bundle root.** Both rules apply to the top level of
+    ``_internal`` and nowhere else, because only the top level is on the DLL
+    search path for our own ``_ssl.pyd``. The SearXNG payload is a *different*
+    interpreter - Python's embeddable 3.11, since SearXNG does not support 3.14
+    - living in its own subdirectory, and it needs its own ``python311.dll``
+    and its own matching OpenSSL beside it.
+
+    Filtering it too is what broke v1.0.0-beta.8. PyInstaller reclassifies
+    ``.dll`` files out of ``datas`` into ``binaries``, so the payload's runtime
+    reached this function, matched "foreign python DLL" and was dropped -
+    leaving an embeddable ``python.exe`` with no runtime. Launching SearXNG then
+    failed with "The code execution cannot proceed because python311.dll was not
+    found", from a dialog titled ``python.exe`` rather than Buddy, while Buddy
+    itself ran fine. Repointing the payload's OpenSSL is the same mistake one
+    layer down: it would pair 3.11's ``_ssl.pyd`` with 3.14's libssl.
     """
     import sys
 
@@ -145,6 +161,13 @@ def _fix_native_libs(binaries):
     for entry in binaries:
         dest, source = entry[0], entry[1]
         name = Path(dest).name.lower()
+        # A nested destination belongs to a bundled payload, not to our own
+        # interpreter, so neither rule below may touch it.
+        at_bundle_root = Path(dest).parent == Path(".")
+
+        if not at_bundle_root:
+            cleaned.append(entry)
+            continue
 
         if (
             name.startswith("python")
