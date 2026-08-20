@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Buddy</title>
+<!--
+  Tauri requires a frontendDist to bundle, but Buddy's real UI is served by its
+  own backend on a port that is not known until runtime - so the shell navigates
+  away from this page as soon as the backend answers (see main.rs).
+
+  This is therefore only ever visible for a moment, and only if navigation
+  fails. It is committed rather than generated because `tauri build` reads it at
+  compile time: gitignoring it builds fine locally and fails on a fresh clone
+  with "frontendDist ... doesn't exist".
+-->
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: grid;
+    place-items: center;
+    background: #0f1115;
+    color: #e6e6e6;
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { text-align: center; }
+  .spinner {
+    width: 28px; height: 28px;
+    margin: 0 auto 18px;
+    border: 2px solid #2a2f3a;
+    border-top-color: #6b8afd;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .hint { margin-top: 8px; color: #8b93a7; font-size: 13px; }
+</style>
+<div class="wrap">
+  <div class="spinner"></div>
+  <div>Starting Buddy…</div>
+  <div class="hint">The first launch takes a few moments.</div>
+</div>
